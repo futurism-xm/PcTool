@@ -4,3 +4,30 @@
 
 IDR_APP_MANIFEST RT_MANIFEST "app.manifest"
 IDI_APP_ICON ICON "../../Resources/PcTool.ico"
+
+1 VERSIONINFO
+ FILEVERSION 0,1,1,0
+ PRODUCTVERSION 0,1,1,0
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0x0L
+ FILEOS 0x40004L
+ FILETYPE 0x1L
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404b0"
+        BEGIN
+            VALUE "FileDescription", "PcTool Desktop Utility\0"
+            VALUE "FileVersion", "0.1.1.0\0"
+            VALUE "InternalName", "PcTool\0"
+            VALUE "OriginalFilename", "PcTool.exe\0"
+            VALUE "ProductName", "PcTool\0"
+            VALUE "ProductVersion", "0.1.1\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0804, 1200
+    END
+END

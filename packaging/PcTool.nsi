@@ -4,6 +4,11 @@
 !include "x64.nsh"
 !include "FileFunc.nsh"
 Name "PcTool"
+VIProductVersion "0.1.1.0"
+VIAddVersionKey /LANG=2052 "ProductName" "PcTool"
+VIAddVersionKey /LANG=2052 "ProductVersion" "0.1.1"
+VIAddVersionKey /LANG=2052 "FileVersion" "0.1.1.0"
+VIAddVersionKey /LANG=2052 "FileDescription" "PcTool Setup"
 OutFile "${OUTPUT}"
 InstallDir "$PROGRAMFILES64\PcTool"
 InstallDirRegKey HKLM "Software\PcToolInstaller" "InstallDir"
@@ -193,7 +198,7 @@ Section "PcTool 与完整 7-Zip" Main
   SetRegView 64
   WriteRegStr HKLM "Software\PcToolInstaller" "InstallDir" "$INSTDIR"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PcTool" "DisplayName" "PcTool（含 7-Zip）"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PcTool" "DisplayVersion" "0.1.0"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PcTool" "DisplayVersion" "0.1.1"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PcTool" "DisplayIcon" "$INSTDIR\PcTool.exe"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PcTool" "InstallLocation" "$INSTDIR"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PcTool" "UninstallString" '$\"$INSTDIR\Uninstall.exe$\"'

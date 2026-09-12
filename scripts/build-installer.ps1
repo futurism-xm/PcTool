@@ -57,7 +57,7 @@ $manifest = "$root/out/package-manifest"
 [IO.File]::WriteAllLines("$manifest/install-files.nsh", $install, [Text.UTF8Encoding]::new($true))
 [IO.File]::WriteAllLines("$manifest/uninstall-files.nsh", $uninstall, [Text.UTF8Encoding]::new($true))
 $files | ForEach-Object { [pscustomobject]@{Path=$_.FullName.Substring($stage.Length + 1);Bytes=$_.Length;SHA256=(Get-FileHash -LiteralPath $_.FullName).Hash} } | ConvertTo-Json | Set-Content "$manifest/files.json" -Encoding UTF8
-$output = "$root/out/installer/PcTool-0.1.0-x64-Setup.exe"
+$output = "$root/out/installer/PcTool-0.1.1-x64-Setup.exe"
 & "$root/out/nsis/nsis-3.12/makensis.exe" /V3 "/DOUTPUT=$output" "/DMANIFEST=$manifest" "/DSTAGE=$stage" "$root/packaging/PcTool.nsi"
 if ($LASTEXITCODE -ne 0) { throw 'NSIS compilation failed' }
 Get-FileHash -LiteralPath $output

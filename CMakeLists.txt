@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(PcTool VERSION 0.1.0 LANGUAGES CXX RC)
+project(PcTool VERSION 0.1.1 LANGUAGES CXX RC)
 
 add_executable(PcToolUninstallHelper src/installer/uninstall_helper.cpp)
 target_compile_features(PcToolUninstallHelper PRIVATE cxx_std_17)
