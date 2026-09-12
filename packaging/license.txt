@@ -1,0 +1,10 @@
+﻿PcTool 集成组件说明
+
+本安装包包含 PcTool、7-Zip 26.03 及离线 OCR 运行库和模型。
+
+7-Zip 版权所有 Igor Pavlov。保留原版文件管理器、压缩/解压界面和资源管理器扩展。
+7-Zip 主要按 GNU LGPL 2.1 或更新版本发布；部分文件使用 BSD 许可或属于公有领域，解码 RAR 的部分同时受 unRAR 限制约束。
+允许修改和重新分发时须遵守对应许可。安装目录 modules/archive 中保留完整许可证，licenses/7zip-source.zip 提供本包对应的完整源码。
+
+OCR 的许可证随安装包位于 ocr_licenses 中；模型版本位于 ocr_models/MODEL_VERSION.txt。
+安装并不自动强制压缩文件默认关联，按 7-Zip 原版方式在“工具 → 选项”中设置。

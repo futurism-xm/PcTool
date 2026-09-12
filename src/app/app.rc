@@ -1,0 +1,6 @@
+#include "shared/ui/resource.h"
+
+#define RT_MANIFEST 24
+
+IDR_APP_MANIFEST RT_MANIFEST "app.manifest"
+IDI_APP_ICON ICON "../../Resources/PcTool.ico"

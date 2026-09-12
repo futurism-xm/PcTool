@@ -1,0 +1,19 @@
+<!doctype html><meta charset="utf-8"><title>PcTool Local Partial Scroll Fixture</title>
+<style>*{box-sizing:border-box}body{margin:0;font:16px "Microsoft YaHei",sans-serif;background:#eceef0;overflow:hidden}header{height:150px;background:#fff;padding:30px;border-bottom:1px solid #777}aside{position:absolute;left:20px;top:170px;width:180px;line-height:55px}main{position:absolute;left:340px;top:290px;width:380px}h3{height:50px;margin:0;background:#ddd;padding:10px;border:1px solid #777}#list{height:240px;overflow-y:scroll;background:white;border:1px solid #777;scroll-behavior:auto}article{height:48px;white-space:nowrap;padding:10px 7px;border-bottom:1px solid #ddd;font-size:14px}footer{position:absolute;left:0;bottom:0;width:100%;height:65px;padding:20px;background:#ddd;border-top:1px solid #777}button{position:absolute;left:780px;top:290px}#counter{position:absolute;left:780px;top:340px}b{font-weight:400}</style>
+<header>固定顶部：PcTool 整屏选区与内部列表<br><p>此页面仅包含合成测试数据，没有外部资源。</p></header>
+<aside>固定侧栏 A<br>固定侧栏 B<br>固定侧栏 C<br>固定侧栏 D</aside>
+<main><h3>固定表头 / Test records</h3><section id="list" tabindex="0" aria-label="内部滚动列表"></section></main><footer>固定底部：仅保留一次 / End of window</footer>
+<button id="advance">滚动 72 像素</button><div id="counter">0</div>
+<button id="reference" style="top:390px">显示完整正文对照</button>
+<button id="retreat" style="top:440px">向上滚动 72 像素</button>
+<button id="middle" style="top:490px">从 144 像素中段开始</button>
+<button id="reset" style="top:540px">恢复初始视口</button>
+<button id="bidirectional-reference" style="top:590px">显示双向正文对照</button>
+<script>const list=document.querySelector('#list');let seed=37893;for(let i=0;i<30;i++){seed=(Math.imul(seed,1664525)+1013904223)>>>0;const row=document.createElement('article');row.textContent=`记录 ${String(i+1).padStart(3,'0')} / ${seed.toString(16)} / 测试 ${seed%9999}`;list.append(row);}document.querySelector('button').onclick=()=>list.scrollBy(0,72);list.onscroll=()=>document.querySelector('#counter').textContent=list.scrollTop;</script>
+<script>document.getElementById("reference").onclick=()=>{document.querySelector("main").style.top="40px";list.style.height="384px";list.scrollTop=0;};</script>
+<script>
+document.getElementById('retreat').onclick=()=>list.scrollBy(0,-72);
+document.getElementById('middle').onclick=()=>list.scrollTop=144;
+document.getElementById('reset').onclick=()=>{document.querySelector('main').style.top='290px';list.style.height='240px';list.scrollTop=0;};
+document.getElementById('bidirectional-reference').onclick=()=>{document.querySelector('main').style.top='40px';list.style.height='456px';list.scrollTop=0;};
+</script>

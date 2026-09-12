@@ -1,0 +1,61 @@
+# Build output, dependency downloads, packages and local reference projects
+/out/
+/build/
+/build-*/
+/cmake-build-*/
+/Reference/
+
+# IDE and developer-specific configuration
+/.idea/
+/.vs/
+/.vscode/
+CMakeUserPresets.json
+*.user
+*.suo
+
+# In-source CMake/compiler artifacts
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
+*.obj
+*.pdb
+*.ilk
+*.pch
+*.exp
+*.tlog
+
+# Generated 7-Zip targets; keep Asm/x86 source code
+/third_party/7zip/CPP/7zip/**/x64/
+/third_party/7zip/CPP/7zip/**/x86/
+
+# Downloaded OCR dependencies, reproduced by scripts/setup-ocr.ps1
+# Keep dependency documentation and license notices in the repository
+/third_party/ocr/include/
+/third_party/ocr/models/
+/third_party/ocr/onnxruntime.dll
+
+# App-managed local settings, credentials and captured content
+Data/
+Cache/
+.env
+.env.*
+!.env.example
+
+# Local evaluation output (keep test code and synthetic fixtures)
+/tests/ocr-evaluation/
+/tests/tts_evaluation/
+__pycache__/
+*.py[cod]
+
+# OS/editor temporary files
+Thumbs.db
+Desktop.ini
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Do not ignore assets by extension: PNG/SVG/ICO and third-party
+# sources, scripts, licenses and test fixtures can be build inputs.

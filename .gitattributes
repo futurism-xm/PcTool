@@ -1,0 +1,2 @@
+# Preserve the exact pinned OCR dictionary bytes used by setup-ocr.ps1.
+/scripts/ocr-v6-tiny-characters.txt -text
