@@ -20,11 +20,13 @@ ShowUninstDetails show
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_PAGE_FINISH
+!define MUI_UNCONFIRMPAGE_TEXT_TOP "确认卸载后，将终止 PcTool 及内置 7-Zip 的全部任务，包括录屏、GIF、压缩和解压。未完成结果可能不可用。必要时会自动重启资源管理器，以释放文件并清除右键菜单。"
 !insertmacro MUI_UNPAGE_CONFIRM
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_UNPAGE_FINISH
 !insertmacro MUI_LANGUAGE "SimpChinese"
 Var OldDirectory
+Var UninstallFailed
 
 Function .onInit
   ${IfNot} ${RunningX64}
@@ -89,7 +91,6 @@ Function ${PREFIX}ClosePcTool
 FunctionEnd
 !macroend
 !insertmacro ClosePcTool ""
-!insertmacro ClosePcTool "un."
 
 ; Explorer may keep the extension mapped. Rename that DLL, install the new one,
 ; and let Windows remove the old mapped copy after reboot (as the upstream installer does).
@@ -141,7 +142,7 @@ FunctionEnd
       DeleteRegKey /ifempty ${ROOT} "${KEY}"
     ${EndIf}
   ${EndIf}
-  DeleteRegKey HKLM "Software\PcToolInstaller\SevenZip\${ID}"
+  ; Preserve recovery information until the entire uninstall succeeds.
 !macroend
 
 !define CLSID "{23170F69-40C1-278A-1000-000100020000}"
@@ -161,6 +162,15 @@ FunctionEnd
 Section "PcTool 与完整 7-Zip" Main
   Call ValidateDirectory
   Call ClosePcTool
+  InitPluginsDir
+  File /oname=$PLUGINSDIR\manage-data.ps1 "manage-data.ps1"
+  File /oname=$PLUGINSDIR\package-files.json "${STAGE}\.pctool-package-files.json"
+  nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\manage-data.ps1" -Action Record -Root "$INSTDIR" -Manifest "$PLUGINSDIR\package-files.json"'
+  Pop $0
+  ${If} $0 != 0
+    MessageBox MB_ICONSTOP "无法保存安装文件清单，安装未完成。" /SD IDOK
+    Abort
+  ${EndIf}
   !insertmacro ReplaceShellDll "7-zip.dll"
   !insertmacro ReplaceShellDll "7-zip32.dll"
   ; Files currently used by an archive job must be released by that job. No force termination.
@@ -207,15 +217,13 @@ Function un.onInit
 FunctionEnd
 
 Section "Uninstall"
-  Call un.ClosePcTool
-  nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\manage-data.ps1" -Action Uninstall -Root "$INSTDIR"'
+  StrCpy $UninstallFailed 0
+  DetailPrint "正在停止本次安装的 PcTool 和内置 7-Zip 任务……"
+  nsExec::ExecToLog '"$INSTDIR\PcToolUninstallHelper.exe" stop "$INSTDIR"'
   Pop $0
-  ${If} $0 == 3010
-    SetRebootFlag true
-    MessageBox MB_ICONINFORMATION "部分数据仍被占用，已安排重启后清理。" /SD IDOK
-  ${ElseIf} $0 != 0
-    MessageBox MB_ICONSTOP "数据清理未完成，请关闭内置 7-zip 或检查目录权限后重试卸载。"
-    Abort
+  ${If} $0 != 0
+    StrCpy $UninstallFailed 1
+    DetailPrint "部分进程终止失败，错误 $0；继续撤销注册和清理其他文件。"
   ${EndIf}
   ; Only restore shell registration while our DLL still owns the CLSID.
   SetRegView 64
@@ -239,19 +247,77 @@ Section "Uninstall"
   ${If} $0 == '$\"$INSTDIR\PcTool.exe$\" --background'
     DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "PcTool"
   ${EndIf}
-  !include "${MANIFEST}\uninstall-files.nsh"
+  System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
+  nsExec::ExecToLog '"$INSTDIR\PcToolUninstallHelper.exe" release-shell "$INSTDIR"'
+  Pop $0
+  ${If} $0 == 3010
+    SetRebootFlag true
+  ${ElseIf} $0 != 0
+    StrCpy $UninstallFailed 1
+    DetailPrint "资源管理器释放或恢复未完成，错误 $0。"
+  ${EndIf}
+  nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\manage-data.ps1" -Action Uninstall -Root "$INSTDIR"'
+  Pop $0
+  ${If} $0 == 3010
+    SetRebootFlag true
+  ${ElseIf} $0 != 0
+    StrCpy $UninstallFailed 1
+  ${EndIf}
   Delete "$SMPROGRAMS\PcTool\PcTool.lnk"
   Delete "$DESKTOP\PcTool.lnk"
   Delete "$SMPROGRAMS\PcTool\压缩管理（7-Zip）.lnk"
   Delete "$SMPROGRAMS\PcTool\7-Zip 帮助.lnk"
   Delete "$SMPROGRAMS\PcTool\卸载 PcTool.lnk"
   RMDir "$SMPROGRAMS\PcTool"
+  ; Detect an actual failed rollback, rather than reporting stale menu registration as success.
+  SetRegView 64
+  ReadRegStr $0 HKLM "${CLASSES}\CLSID\${CLSID}\InprocServer32" ""
+  ${If} $0 == "$INSTDIR\modules\archive\7-zip.dll"
+    StrCpy $UninstallFailed 1
+    DetailPrint "64 位右键扩展注册仍指向本次安装。"
+  ${EndIf}
+  SetRegView 32
+  ReadRegStr $0 HKLM "${CLASSES}\CLSID\${CLSID}\InprocServer32" ""
+  ${If} $0 == "$INSTDIR\modules\archive\7-zip32.dll"
+    StrCpy $UninstallFailed 1
+    DetailPrint "32 位右键扩展注册仍指向本次安装。"
+  ${EndIf}
+  ${If} $UninstallFailed != 0
+    SetErrorLevel 1
+    MessageBox MB_ICONSTOP "部分项目清理失败，请查看上方详细记录。已保留卸载器和清理信息，可重新运行卸载；未报告清理完成。" /SD IDOK
+    Abort
+  ${EndIf}
+  ClearErrors
+  Delete /REBOOTOK "$INSTDIR\manage-data.ps1"
+  Delete /REBOOTOK "$INSTDIR\PcToolUninstallHelper.exe"
+  ${If} ${Errors}
+    SetErrorLevel 1
+    MessageBox MB_ICONSTOP "卸载辅助文件清理失败，未完成卸载。请查看详细记录。" /SD IDOK
+    Abort
+  ${EndIf}
+  Delete /REBOOTOK "$INSTDIR\.pctool-package-files.json"
+  Delete /REBOOTOK "$INSTDIR\.pctool-managed-files.json"
+  Delete /REBOOTOK "$INSTDIR\.pctool-uninstalling"
   Delete /REBOOTOK "$INSTDIR\Uninstall.exe"
-  RMDir "$INSTDIR"
+  ; Remove the root after deferred children; unrelated files still prevent removal.
+  IfRebootFlag 0 uninstall_root_now
+  RMDir /REBOOTOK "$INSTDIR"
+  Goto uninstall_root_done
+  uninstall_root_now:
+    RMDir "$INSTDIR"
+  uninstall_root_done:
   SetRegView 32
   DeleteRegKey HKLM "Software\PcToolInstaller"
   SetRegView 64
   DeleteRegKey HKLM "Software\PcToolInstaller"
   DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PcTool"
   System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
+  IfRebootFlag 0 uninstall_complete
+    SetErrorLevel 3010
+    DetailPrint "部分文件已安排在重启后删除；需要重启才能完成清理。"
+    Goto uninstall_end
+  uninstall_complete:
+    SetErrorLevel 0
+    DetailPrint "PcTool 受管文件与系统注册已清理；用户自行保存的无关文件予以保留。"
+  uninstall_end:
 SectionEnd

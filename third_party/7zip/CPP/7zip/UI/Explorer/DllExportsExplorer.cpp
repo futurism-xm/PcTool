@@ -7,6 +7,7 @@
 // but if I call menu for desktop items it's locked all the time
 
 #include "StdAfx.h"
+#include "../../../Windows/PcToolStorage.h"
 
 #include "../../../Common/MyWindows.h"
 
@@ -97,6 +98,7 @@ Z7_COMWF_B CShellExtClassFactory::CreateInstance(LPUNKNOWN pUnkOuter,
   OutputDebugStringA(s);
   */
   *ppvObj = NULL;
+  if (PcToolStorage::Uninstalling()) return CLASS_E_CLASSNOTAVAILABLE;
   if (pUnkOuter)
     return CLASS_E_NOAGGREGATION;
   
@@ -177,6 +179,7 @@ STDAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, LPVOID* ppv)
 {
   ODS("In DllGetClassObject\r\n");
   *ppv = NULL;
+  if (PcToolStorage::Uninstalling()) return CLASS_E_CLASSNOTAVAILABLE;
   if (IsEqualIID(rclsid, CLSID_CZipContextMenu))
   {
     CShellExtClassFactory *cf;

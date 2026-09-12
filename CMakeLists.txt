@@ -2,6 +2,14 @@ cmake_minimum_required(VERSION 3.24)
 
 project(PcTool VERSION 0.1.0 LANGUAGES CXX RC)
 
+add_executable(PcToolUninstallHelper src/installer/uninstall_helper.cpp)
+target_compile_features(PcToolUninstallHelper PRIVATE cxx_std_17)
+target_link_libraries(PcToolUninstallHelper PRIVATE Advapi32 Userenv User32)
+if(MSVC)
+    target_compile_options(PcToolUninstallHelper PRIVATE /W4 /utf-8 /EHsc)
+    set_property(TARGET PcToolUninstallHelper PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
 add_executable(PcToolStorageTests tests/storage_tests.cpp src/app/app_settings.cpp)
 add_executable(PcToolArchiveStorageTests tests/archive_storage_tests.cpp)
 target_compile_features(PcToolArchiveStorageTests PRIVATE cxx_std_17)
@@ -99,6 +107,13 @@ set_property(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" PROPERTY VS_STARTUP_PROJECT
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(PcToolUninstallFixture tests/uninstall_process_fixture.cpp)
+    target_compile_features(PcToolUninstallFixture PRIVATE cxx_std_17)
+    target_compile_definitions(PcToolUninstallFixture PRIVATE UNICODE _UNICODE)
+    target_link_libraries(PcToolUninstallFixture PRIVATE Advapi32 User32)
+    if(MSVC)
+        target_compile_options(PcToolUninstallFixture PRIVATE /utf-8 /EHsc)
+    endif()
     add_executable(PcToolCaptureTests tests/capture_core_tests.cpp src/shared/image/image_document.cpp src/long_capture/scroll_stitcher.cpp src/ocr/ocr_text_merge.cpp)
     target_include_directories(PcToolCaptureTests PRIVATE src)
     target_compile_features(PcToolCaptureTests PRIVATE cxx_std_17)

@@ -1,6 +1,7 @@
 // MainAr.cpp
 
 #include "StdAfx.h"
+#include "../../../Windows/PcToolStorage.h"
 
 #ifdef _WIN32
 #include "../../../../C/DllSecur.h"
@@ -107,6 +108,7 @@ int Z7_CDECL main
   #endif
 )
 {
+  if (PcToolStorage::Uninstalling()) return ERROR_INSTALL_ALREADY_RUNNING;
   g_ErrStream = &g_StdErr;
   g_StdStream = &g_StdOut;
 

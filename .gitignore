@@ -59,3 +59,10 @@ Desktop.ini
 
 # Do not ignore assets by extension: PNG/SVG/ICO and third-party
 # sources, scripts, licenses and test fixtures can be build inputs.
+
+# Source and regression checks required by the uninstall implementation.
+!/tests/uninstall_process_fixture.cpp
+!/tests/uninstall_priority_tests.ps1
+!/tests/uninstall_cleanup_tests.ps1
+!/tests/uninstall_installer_isolated.ps1
+!/tests/UNINSTALL_PRIORITY_REPORT.md

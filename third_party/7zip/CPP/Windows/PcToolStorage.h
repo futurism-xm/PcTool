@@ -18,12 +18,18 @@ inline std::wstring ModuleDirectory() {
 inline std::wstring Root() {
   std::wstring path=ModuleDirectory();
   for(int i=0;i<4&&!path.empty();++i){
-    if(GetFileAttributesW((path+L"\\PcTool.exe").c_str())!=INVALID_FILE_ATTRIBUTES)return path;
+    if(GetFileAttributesW((path+L"\\PcTool.exe").c_str())!=INVALID_FILE_ATTRIBUTES ||
+       GetFileAttributesW((path+L"\\.pctool-uninstalling").c_str())!=INVALID_FILE_ATTRIBUTES)return path;
     size_t slash=path.find_last_of(L"\\/");if(slash==std::wstring::npos)break;path.resize(slash);
   }return L"";
 }
 inline bool Mkdir(const std::wstring& p){DWORD a=GetFileAttributesW(p.c_str());if(a!=INVALID_FILE_ATTRIBUTES&&(a&FILE_ATTRIBUTE_REPARSE_POINT))return false;return CreateDirectoryW(p.c_str(),0)||GetLastError()==ERROR_ALREADY_EXISTS;}
+inline bool Uninstalling() {
+  const std::wstring root=Root();
+  return !root.empty() && GetFileAttributesW((root+L"\\.pctool-uninstalling").c_str())!=INVALID_FILE_ATTRIBUTES;
+}
 inline std::wstring Directory(const wchar_t* category) {
+  if(Uninstalling())return L"";
   std::wstring root=Root();if(root.empty())return L"";
   HANDLE token=0;if(!OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY,&token))return L"";
   DWORD size=0;GetTokenInformation(token,TokenUser,0,0,&size);std::vector<BYTE> bytes(size);

@@ -1,6 +1,7 @@
 // GUI.cpp
 
 #include "StdAfx.h"
+#include "../../../Windows/PcToolStorage.h"
 
 #ifdef _WIN32
 #include "../../../../C/DllSecur.h"
@@ -413,6 +414,7 @@ int APIENTRY WinMain(HINSTANCE  hInstance, HINSTANCE /* hPrevInstance */,
   #endif
   /* lpCmdLine */, int /* nCmdShow */)
 {
+  if (PcToolStorage::Uninstalling()) return ERROR_INSTALL_ALREADY_RUNNING;
   g_hInstance = hInstance;
   
   #ifdef _WIN32

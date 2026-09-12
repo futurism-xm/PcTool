@@ -46,8 +46,8 @@ public:
 private:
     std::uint32_t visibleItems_{kAllMonitorItems};
     bool autoStartEnabled_{true};
-    bool translationEnabled_{};
-    bool screenshotEnabled_{};
+    bool translationEnabled_{true};
+    bool screenshotEnabled_{true};
     bool monitorInTaskbar_{true};
     hotkeys::Bindings hotkeys_{hotkeys::Defaults};
 };

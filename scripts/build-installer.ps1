@@ -18,6 +18,11 @@ $stage = Join-Path $root ('out/package-stage/' + [Guid]::NewGuid().ToString('N')
 New-Item -ItemType Directory -Force "$stage/licenses", "$root/out/installer", "$root/out/package-manifest" | Out-Null
 & cmake --install $BuildDirectory --config Release --prefix $stage
 if ($LASTEXITCODE -ne 0) { throw 'Install staging failed' }
+foreach ($developmentDirectory in @('docs', 'tests')) {
+    if (Test-Path -LiteralPath (Join-Path $stage $developmentDirectory)) {
+        throw "Development-only directory must not be packaged: $developmentDirectory"
+    }
+}
 # Preserve Asm/x86 (real source); exclude only generated compiler target directories.
 $sourceRoot=Join-Path $root 'third_party/7zip'
 $sourceStage=Join-Path $root ('out/source-package/' + [Guid]::NewGuid().ToString('N') + '/7zip')
@@ -30,6 +35,11 @@ Get-ChildItem -LiteralPath $sourceRoot -Recurse -File -Force | Where-Object { $_
 if ($LASTEXITCODE -ne 0) { throw 'Source archive failed' }
 Copy-Item "$root/packaging/license.txt" "$stage/licenses/COMPONENTS.txt"
 Copy-Item "$root/packaging/manage-data.ps1" "$stage/manage-data.ps1"
+$payload = @(Get-ChildItem -LiteralPath $stage -Recurse -File | ForEach-Object { $_.FullName.Substring($stage.Length + 1).Replace('\','/') })
+$directories = @(Get-ChildItem -LiteralPath $stage -Recurse -Directory | ForEach-Object { $_.FullName.Substring($stage.Length + 1).Replace('\','/') })
+$legacy = @(Get-Content "$root/packaging/legacy-development-files.txt" | Where-Object { $_ })
+@{ Version=1; Files=@($payload + '.pctool-package-files.json' + $legacy); Directories=@($directories + 'docs' + 'tests' + 'tests/fixtures' + 'tests/ocr-evaluation' + 'tests/tts_evaluation' + 'tests/__pycache__') } |
+    ConvertTo-Json -Depth 4 | Set-Content "$stage/.pctool-package-files.json" -Encoding UTF8
 $files = @(Get-ChildItem -LiteralPath $stage -Recurse -File | Sort-Object FullName)
 $install = [Collections.Generic.List[string]]::new()
 $uninstall = [Collections.Generic.List[string]]::new()
@@ -48,6 +58,6 @@ $manifest = "$root/out/package-manifest"
 [IO.File]::WriteAllLines("$manifest/uninstall-files.nsh", $uninstall, [Text.UTF8Encoding]::new($true))
 $files | ForEach-Object { [pscustomobject]@{Path=$_.FullName.Substring($stage.Length + 1);Bytes=$_.Length;SHA256=(Get-FileHash -LiteralPath $_.FullName).Hash} } | ConvertTo-Json | Set-Content "$manifest/files.json" -Encoding UTF8
 $output = "$root/out/installer/PcTool-0.1.0-x64-Setup.exe"
-& "$root/out/nsis/nsis-3.12/makensis.exe" /V3 "/DOUTPUT=$output" "/DMANIFEST=$manifest" "$root/packaging/PcTool.nsi"
+& "$root/out/nsis/nsis-3.12/makensis.exe" /V3 "/DOUTPUT=$output" "/DMANIFEST=$manifest" "/DSTAGE=$stage" "$root/packaging/PcTool.nsi"
 if ($LASTEXITCODE -ne 0) { throw 'NSIS compilation failed' }
 Get-FileHash -LiteralPath $output

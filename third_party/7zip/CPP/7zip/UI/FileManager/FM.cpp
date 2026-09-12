@@ -1,6 +1,7 @@
 // FM.cpp
 
 #include "StdAfx.h"
+#include "../../../Windows/PcToolStorage.h"
 
 #include "../../../Common/MyWindows.h"
 
@@ -790,6 +791,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE /* hPrevInstance */,
     #endif
     /* lpCmdLine */, int nCmdShow)
 {
+  if (PcToolStorage::Uninstalling()) return ERROR_INSTALL_ALREADY_RUNNING;
   g_hInstance = hInstance;
 
   try

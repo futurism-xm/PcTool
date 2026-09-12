@@ -344,6 +344,9 @@ private:
 }  // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int) {
+    // Check before every auxiliary entry point, including --archive and pinned windows.
+    if (GetFileAttributesW((app_storage::Root() / L".pctool-uninstalling").c_str()) != INVALID_FILE_ATTRIBUTES)
+        return ERROR_INSTALL_ALREADY_RUNNING;
     int argc=0;auto argv=CommandLineToArgvW(GetCommandLineW(),&argc);
     if(argv && argc>=2 && wcscmp(argv[1],L"--archive")==0) {
         const std::wstring path=argc>=3?argv[2]:L"";LocalFree(argv);

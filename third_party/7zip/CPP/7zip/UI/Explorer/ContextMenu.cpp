@@ -1,6 +1,7 @@
 // ContextMenu.cpp
 
 #include "StdAfx.h"
+#include "../../../Windows/PcToolStorage.h"
 
 #include "../../../Common/ComTry.h"
 #include "../../../Common/IntToString.h"
@@ -585,6 +586,7 @@ static HRESULT RETURN_WIN32_LastError_AS_HRESULT()
 Z7_COMWF_B CZipContextMenu::QueryContextMenu(HMENU hMenu, UINT indexMenu,
       UINT commandIDFirst, UINT commandIDLast, UINT flags)
 {
+  if (PcToolStorage::Uninstalling()) return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 0);
   ODS("+ QueryContextMenu()")
   COM_TRY_BEGIN
   try {
@@ -1194,6 +1196,7 @@ Z7_COMWF_B CZipContextMenu::InvokeCommand(LPCMINVOKECOMMANDINFO commandInfo)
 {
   COM_TRY_BEGIN
 
+  if (PcToolStorage::Uninstalling()) return E_ACCESSDENIED;
   ODS("==== CZipContextMenu::InvokeCommand()")
 
   #ifdef SHOW_DEBUG_CTX_MENU
