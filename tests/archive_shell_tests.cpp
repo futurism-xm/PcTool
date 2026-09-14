@@ -22,6 +22,8 @@ int wmain(int argc,wchar_t** argv) {
         if(!module) Check(HRESULT_FROM_WIN32(GetLastError()));
         auto getClass=reinterpret_cast<HRESULT(WINAPI*)(REFCLSID,REFIID,void**)>(GetProcAddress(module,"DllGetClassObject"));
         if(!getClass) Check(E_NOINTERFACE);
+        auto canUnload=reinterpret_cast<HRESULT(WINAPI*)()>(GetProcAddress(module,"DllCanUnloadNow"));
+        if(!canUnload||canUnload()!=S_OK)Check(E_FAIL);
         CLSID clsid{};Check(CLSIDFromString(L"{23170F69-40C1-278A-1000-000100020000}",&clsid));
         ComPtr<IClassFactory> factory;Check(getClass(clsid,IID_PPV_ARGS(&factory)));
         ComPtr<IShellExtInit> extension;Check(factory->CreateInstance(nullptr,IID_PPV_ARGS(&extension)));
@@ -38,6 +40,12 @@ int wmain(int argc,wchar_t** argv) {
         const int count=GetMenuItemCount(menu);
         DestroyMenu(menu);Check(hr);
         if(count<=0 || HRESULT_CODE(hr)==0) Check(E_FAIL);
+        const auto hive=runtime.parent_path().parent_path()/L"Data/SevenZip/settings.hiv";
+        if(std::filesystem::exists(hive)){
+            HANDLE fileHandle=CreateFileW(hive.c_str(),GENERIC_READ,0,nullptr,OPEN_EXISTING,0,nullptr);
+            if(fileHandle==INVALID_HANDLE_VALUE)Check(HRESULT_FROM_WIN32(GetLastError()));CloseHandle(fileHandle);
+            std::cout<<"PASS settings hive released while menu object and DLL remain alive.\n";
+        }
         if(argc==3 && std::wstring(argv[2])==L"uninstall-guard") {
             const auto root=runtime.parent_path().parent_path();
             if(!std::filesystem::exists(root/L"PcTool.exe")) Check(E_INVALIDARG);
@@ -57,6 +65,11 @@ int wmain(int argc,wchar_t** argv) {
             std::cout<<"PASS: loaded class factory, existing menu and cached command reject uninstall-time work.\n";
         }
         std::cout<<"PASS: original 7-Zip COM shell extension initialized with a real file and populated its context menu.\n";
+        context.Reset();extension.Reset();Check(factory->LockServer(TRUE));factory.Reset();
+        if(canUnload()!=S_FALSE)Check(E_FAIL);
+        Check(getClass(clsid,IID_PPV_ARGS(&factory)));Check(factory->LockServer(FALSE));factory.Reset();
+        if(canUnload()!=S_OK)Check(E_FAIL);
+        std::cout<<"PASS COM unload count and LockServer balance.\n";
     } catch(HRESULT hr) {std::cerr<<"Shell integration failed: 0x"<<std::hex<<unsigned(hr)<<"\n";result=1;}
     if(module) FreeLibrary(module);
     std::filesystem::remove(file);

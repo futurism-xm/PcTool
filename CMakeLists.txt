@@ -1,10 +1,10 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(PcTool VERSION 0.1.1 LANGUAGES CXX RC)
+project(PcTool VERSION 0.1.2 LANGUAGES CXX RC)
 
 add_executable(PcToolUninstallHelper src/installer/uninstall_helper.cpp)
 target_compile_features(PcToolUninstallHelper PRIVATE cxx_std_17)
-target_link_libraries(PcToolUninstallHelper PRIVATE Advapi32 Userenv User32)
+target_link_libraries(PcToolUninstallHelper PRIVATE Advapi32 Userenv User32 Shell32)
 if(MSVC)
     target_compile_options(PcToolUninstallHelper PRIVATE /W4 /utf-8 /EHsc)
     set_property(TARGET PcToolUninstallHelper PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
@@ -42,6 +42,10 @@ if(MSVC AND CMAKE_GENERATOR MATCHES "Ninja")
     endforeach()
     set_property(SOURCE ${PCTOOL_CPP_SOURCES} APPEND PROPERTY
         OBJECT_DEPENDS "${PCTOOL_ABSOLUTE_HEADERS}")
+    set_property(SOURCE tests/storage_tests.cpp APPEND PROPERTY
+        OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/shared/platform/app_storage.h")
+    set_property(SOURCE tests/archive_storage_tests.cpp APPEND PROPERTY
+        OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/7zip/CPP/Windows/PcToolStorage.h")
 endif()
 
 target_include_directories(PcTool PRIVATE src src/app)
@@ -107,6 +111,10 @@ set_property(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" PROPERTY VS_STARTUP_PROJECT
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(PcToolUninstallHostTests tests/uninstall_host_tests.cpp)
+    target_compile_features(PcToolUninstallHostTests PRIVATE cxx_std_17)
+    target_link_libraries(PcToolUninstallHostTests PRIVATE Advapi32 Userenv User32 Shell32)
+    set_property(SOURCE tests/uninstall_host_tests.cpp APPEND PROPERTY OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/installer/uninstall_helper.cpp")
     add_executable(PcToolUninstallFixture tests/uninstall_process_fixture.cpp)
     target_compile_features(PcToolUninstallFixture PRIVATE cxx_std_17)
     target_compile_definitions(PcToolUninstallFixture PRIVATE UNICODE _UNICODE)
@@ -186,6 +194,8 @@ if(BUILD_TESTING)
         set_property(SOURCE tests/hotkey_settings_tests.cpp APPEND PROPERTY OBJECT_DEPENDS "${PCTOOL_ABSOLUTE_HEADERS}")
     endif()
     add_executable(PcToolCaptureIntegration tests/capture_integration.cpp
+        tests/capture_memory_tests.cpp
+        src/translation/translation_capture.cpp
         tests/screenshot_interaction_tests.cpp
         tests/ocr_comparison.cpp
         src/shared/image/image_document.cpp src/long_capture/scroll_stitcher.cpp src/ocr/ocr_text_merge.cpp src/shared/platform/capture_platform.cpp src/shared/ui/capture_ui.cpp
@@ -222,6 +232,8 @@ if(BUILD_TESTING)
     # Interactive desktop/audio integration is opt-in; core tests work unattended.
     option(PCTOOL_ENABLE_DESKTOP_TESTS "Enable tests requiring an interactive desktop, Chinese OCR and audio devices" OFF)
     if(PCTOOL_ENABLE_DESKTOP_TESTS)
+        add_test(NAME capture_memory COMMAND PcToolCaptureIntegration memory-test enforce)
+        set_tests_properties(capture_memory PROPERTIES RUN_SERIAL TRUE TIMEOUT 120 LABELS desktop)
         add_test(NAME ocr_local_comparison COMMAND PcToolCaptureIntegration ocr-compare "${CMAKE_CURRENT_BINARY_DIR}/ocr-comparison")
         set_tests_properties(ocr_local_comparison PROPERTIES RUN_SERIAL TRUE TIMEOUT 120 LABELS desktop)
         add_test(NAME capture_pin_interactions COMMAND PcToolCaptureIntegration pin-interaction-test "${CMAKE_CURRENT_BINARY_DIR}/pin-interactions")

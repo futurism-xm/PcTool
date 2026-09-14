@@ -4,10 +4,10 @@
 !include "x64.nsh"
 !include "FileFunc.nsh"
 Name "PcTool"
-VIProductVersion "0.1.1.0"
+VIProductVersion "0.1.2.0"
 VIAddVersionKey /LANG=2052 "ProductName" "PcTool"
-VIAddVersionKey /LANG=2052 "ProductVersion" "0.1.1"
-VIAddVersionKey /LANG=2052 "FileVersion" "0.1.1.0"
+VIAddVersionKey /LANG=2052 "ProductVersion" "0.1.2"
+VIAddVersionKey /LANG=2052 "FileVersion" "0.1.2.0"
 VIAddVersionKey /LANG=2052 "FileDescription" "PcTool Setup"
 OutFile "${OUTPUT}"
 InstallDir "$PROGRAMFILES64\PcTool"
@@ -198,7 +198,7 @@ Section "PcTool 与完整 7-Zip" Main
   SetRegView 64
   WriteRegStr HKLM "Software\PcToolInstaller" "InstallDir" "$INSTDIR"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PcTool" "DisplayName" "PcTool（含 7-Zip）"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PcTool" "DisplayVersion" "0.1.1"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PcTool" "DisplayVersion" "0.1.2"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PcTool" "DisplayIcon" "$INSTDIR\PcTool.exe"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PcTool" "InstallLocation" "$INSTDIR"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PcTool" "UninstallString" '$\"$INSTDIR\Uninstall.exe$\"'
@@ -227,8 +227,9 @@ Section "Uninstall"
   nsExec::ExecToLog '"$INSTDIR\PcToolUninstallHelper.exe" stop "$INSTDIR"'
   Pop $0
   ${If} $0 != 0
-    StrCpy $UninstallFailed 1
-    DetailPrint "部分进程终止失败，错误 $0；继续撤销注册和清理其他文件。"
+    SetErrorLevel 1
+    MessageBox MB_ICONSTOP "本次安装的进程尚未全部退出（错误 $0），已停止文件删除。请查看详细记录后重试卸载。" /SD IDOK
+    Abort
   ${EndIf}
   ; Only restore shell registration while our DLL still owns the CLSID.
   SetRegView 64
@@ -256,10 +257,18 @@ Section "Uninstall"
   nsExec::ExecToLog '"$INSTDIR\PcToolUninstallHelper.exe" release-shell "$INSTDIR"'
   Pop $0
   ${If} $0 == 3010
-    SetRebootFlag true
+    DetailPrint "仍有扩展占用待复查，将在文件删除重试后确认是否需要重启。"
   ${ElseIf} $0 != 0
     StrCpy $UninstallFailed 1
     DetailPrint "资源管理器释放或恢复未完成，错误 $0。"
+  ${EndIf}
+  ; Confirm no owned task appeared during shell recovery, before deleting its files.
+  nsExec::ExecToLog '"$INSTDIR\PcToolUninstallHelper.exe" stop "$INSTDIR"'
+  Pop $0
+  ${If} $0 != 0
+    SetErrorLevel 1
+    MessageBox MB_ICONSTOP "占用复查发现本次安装仍有进程未退出（错误 $0），已停止文件删除。请重试卸载。" /SD IDOK
+    Abort
   ${EndIf}
   nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\manage-data.ps1" -Action Uninstall -Root "$INSTDIR"'
   Pop $0
@@ -292,6 +301,12 @@ Section "Uninstall"
     MessageBox MB_ICONSTOP "部分项目清理失败，请查看上方详细记录。已保留卸载器和清理信息，可重新运行卸载；未报告清理完成。" /SD IDOK
     Abort
   ${EndIf}
+  ; A deferred removal is unfinished. Keep the retry tools and registration.
+  IfRebootFlag 0 uninstall_finalize
+    SetErrorLevel 3010
+    DetailPrint "仍有文件被占用，已保留卸载器和清理信息。释放占用后可再次运行卸载器重试；详情列出了延期删除的文件。"
+    Goto uninstall_end
+  uninstall_finalize:
   ClearErrors
   Delete /REBOOTOK "$INSTDIR\manage-data.ps1"
   Delete /REBOOTOK "$INSTDIR\PcToolUninstallHelper.exe"

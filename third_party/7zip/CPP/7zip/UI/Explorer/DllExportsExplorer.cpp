@@ -119,9 +119,10 @@ Z7_COMWF_B CShellExtClassFactory::CreateInstance(LPUNKNOWN pUnkOuter,
 }
 
 
-Z7_COMWF_B CShellExtClassFactory::LockServer(BOOL /* fLock */)
+Z7_COMWF_B CShellExtClassFactory::LockServer(BOOL fLock)
 {
-  return S_OK; // Check it
+  if(fLock)InterlockedIncrement(&g_DllRefCount);else InterlockedDecrement(&g_DllRefCount);
+  return S_OK;
 }
 
 
@@ -172,7 +173,7 @@ STDAPI DllCanUnloadNow(void)
   else
     ODS( "g_DllRefCount != 0");
   */
-  return (g_DllRefCount == 0 ? S_OK : S_FALSE);
+  return (InterlockedCompareExchange(&g_DllRefCount,0,0) == 0 ? S_OK : S_FALSE);
 }
 
 STDAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, LPVOID* ppv)

@@ -51,6 +51,27 @@ try {
     if ((Test-Path "$normal/Data") -or (Test-Path "$normal/Cache") -or !(Test-Path "$normal/keep.txt")) { throw 'Normal cleanup or unrelated file protection failed' }
     'PASS normal cleanup and unrelated files'
 
+    $transient=Prepare 'transient-lock'
+    $transientFile="$transient/Data/test/SevenZip/brief.tmp"
+    $transientStream=[IO.File]::Open($transientFile,'Create','ReadWrite','None')
+    $cleanupProcess=$null
+    try {
+        $cleanupProcess=Start-Process -FilePath $shell -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',('"'+$scriptPath+'"'),'-Action','Uninstall','-Root',('"'+$transient+'"')) -WindowStyle Hidden -PassThru -RedirectStandardOutput "$transient/retry.log" -RedirectStandardError "$transient/retry-error.log"
+        $observed=$false
+        for($attempt=0;$attempt -lt 200;$attempt++){
+            if((Get-Content -LiteralPath "$transient/retry.log" -Raw -ErrorAction SilentlyContinue) -match 'Waiting for release before retry'){$observed=$true;break}
+            if($cleanupProcess.HasExited){break};Start-Sleep -Milliseconds 50
+        }
+        $transientStream.Dispose();$transientStream=$null
+        if(!$cleanupProcess.WaitForExit(10000)-or $cleanupProcess.ExitCode -ne 0 -or !$observed){throw 'Transient lock was not retried successfully'}
+        if(Test-Path "$transient/Data"){throw 'Transiently locked data survived retry'}
+        if(@(Read-Pending | Where-Object {$_ -like ('*'+$transient+'*')}).Count){throw 'Transient lock incorrectly scheduled reboot'}
+        'PASS real transient lock released during retry; cleanup returns 0 without reboot queue'
+    } finally {
+        if($transientStream){$transientStream.Dispose()}
+        if($cleanupProcess){if(!$cleanupProcess.HasExited){$cleanupProcess.Kill();$cleanupProcess.WaitForExit()};$cleanupProcess.Dispose()}
+    }
+
     foreach ($kind in @('file-lock', 'loaded-hive')) {
         $directory = Prepare $kind
         $file = "$directory/Data/test/SevenZip/settings.hiv"

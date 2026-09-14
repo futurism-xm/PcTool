@@ -6,6 +6,7 @@
 #include <tchar.h>
 #include <string>
 #include <vector>
+#include <map>
 extern "C" WINADVAPI LONG WINAPI RegLoadAppKeyW(LPCWSTR,PHKEY,REGSAM,DWORD,DWORD);
 namespace PcToolStorage {
 inline std::wstring ModuleDirectory() {
@@ -28,23 +29,45 @@ inline bool Uninstalling() {
   const std::wstring root=Root();
   return !root.empty() && GetFileAttributesW((root+L"\\.pctool-uninstalling").c_str())!=INVALID_FILE_ATTRIBUTES;
 }
-inline std::wstring Directory(const wchar_t* category) {
-  if(Uninstalling())return L"";
-  std::wstring root=Root();if(root.empty())return L"";
+inline std::wstring LegacyData(const std::wstring& root) {
   HANDLE token=0;if(!OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY,&token))return L"";
   DWORD size=0;GetTokenInformation(token,TokenUser,0,0,&size);std::vector<BYTE> bytes(size);
   BOOL ok=GetTokenInformation(token,TokenUser,&bytes[0],size,&size);CloseHandle(token);if(!ok)return L"";
   LPWSTR sid=0;if(!ConvertSidToStringSidW(reinterpret_cast<TOKEN_USER*>(&bytes[0])->User.Sid,&sid))return L"";
-  std::wstring path=root+L"\\"+category;bool made=Mkdir(path);path+=L"\\";path+=sid;LocalFree(sid);
-  if(!made)return L"";made=Mkdir(path);if(!made)return L"";path+=L"\\SevenZip";made=Mkdir(path);if(!made)return L"";
+  std::wstring path=root+L"\\Data\\"+sid;LocalFree(sid);return path;
+}
+struct CacheLease {HANDLE value;CacheLease():value(0){}~CacheLease(){if(value)CloseHandle(value);}private:CacheLease(const CacheLease&);CacheLease& operator=(const CacheLease&);};
+inline std::wstring Directory(const wchar_t* category) {
+  if(Uninstalling())return L"";
+  std::wstring root=Root();if(root.empty())return L"";
+  std::wstring path=root+L"\\"+category;if(!Mkdir(path))return L"";
   if(wcscmp(category,L"Cache")==0){
-    static HANDLE lease=INVALID_HANDLE_VALUE;
-    if(lease==INVALID_HANDLE_VALUE){wchar_t name[64];wsprintfW(name,L"\\.active-%lu",GetCurrentProcessId());lease=CreateFileW((path+name).c_str(),GENERIC_READ,FILE_SHARE_READ,0,OPEN_ALWAYS,FILE_ATTRIBUTE_NORMAL,0);if(lease==INVALID_HANDLE_VALUE)return L"";}
+    SYSTEMTIME today={};GetLocalTime(&today);wchar_t date[16]={};
+    wsprintfW(date,L"\\%04u-%02u-%02u",unsigned(today.wYear),unsigned(today.wMonth),unsigned(today.wDay));
+    path+=date;if(!Mkdir(path))return L"";
+  }
+  path+=L"\\SevenZip";
+  if(wcscmp(category,L"Data")==0 && GetFileAttributesW(path.c_str())==INVALID_FILE_ATTRIBUTES){
+    const std::wstring legacy=LegacyData(root),source=legacy+L"\\SevenZip";
+    const DWORD a=GetFileAttributesW(source.c_str()),parent=GetFileAttributesW(legacy.c_str());
+    if(!legacy.empty()&&a!=INVALID_FILE_ATTRIBUTES){
+      if((a&FILE_ATTRIBUTE_REPARSE_POINT)||(parent&FILE_ATTRIBUTE_REPARSE_POINT))return L"";
+      if(!MoveFileExW(source.c_str(),path.c_str(),MOVEFILE_WRITE_THROUGH))return L"";
+      RemoveDirectoryW(legacy.c_str());
+    }
+  }
+  if(!Mkdir(path))return L"";
+  if(wcscmp(category,L"Cache")==0){
+    // Keep a lease for every date used by this process, including across midnight.
+    struct Lock {CRITICAL_SECTION value;Lock(){InitializeCriticalSection(&value);}~Lock(){DeleteCriticalSection(&value);}};
+    static Lock lock;static std::map<std::wstring,CacheLease> leases;
+    struct Guard {CRITICAL_SECTION* p;Guard(CRITICAL_SECTION* value):p(value){EnterCriticalSection(p);}~Guard(){LeaveCriticalSection(p);}} guard(&lock.value);
+    HANDLE& lease=leases[path].value;
+    if(!lease){wchar_t name[64];wsprintfW(name,L"\\.active-%lu",GetCurrentProcessId());lease=CreateFileW((path+name).c_str(),GENERIC_READ,FILE_SHARE_READ,0,OPEN_ALWAYS,FILE_ATTRIBUTE_NORMAL,0);if(lease==INVALID_HANDLE_VALUE){lease=0;return L"";}}
   }return path;
 }
 inline HKEY Hive() {
-  // Windows shares the backing hive across module/process instances.
-  static HKEY hive=0;if(hive)return hive;
+  // Caller owns this root handle. Child keys retain the hive only while in use.
   const std::wstring dir=Directory(L"Data");if(dir.empty()){
     if(!Root().empty()){static bool warned=false;if(!warned){warned=true;MessageBoxW(0,L"Cannot write PcTool Data directory. Check installation permissions.",L"PcTool - 7-zip",MB_OK|MB_ICONERROR);}}
     return 0;
@@ -52,8 +75,7 @@ inline HKEY Hive() {
   const std::wstring file=dir+L"\\settings.hiv";
   HKEY loaded=0;
   if(RegLoadAppKeyW(file.c_str(),&loaded,KEY_ALL_ACCESS,0,0)!=ERROR_SUCCESS)return 0;
-  auto previous=InterlockedCompareExchangePointer(reinterpret_cast<PVOID volatile*>(&hive),loaded,0);
-  if(previous)RegCloseKey(loaded);return hive;
+  return loaded;
 }
 inline bool Redirect(HKEY& parent,LPCTSTR name) {
   if(parent!=HKEY_CURRENT_USER||!name)return true;
@@ -62,5 +84,13 @@ inline bool Redirect(HKEY& parent,LPCTSTR name) {
   if(_tcsnicmp(name,prefix,n)!=0||(name[n]!=0&&name[n]!=TEXT('\\')))return true;
   parent=Hive();return parent!=0;
 }
+struct ScopedRedirect {
+  HKEY key;bool valid;bool owned;
+  ScopedRedirect(HKEY parent,LPCTSTR name):key(parent),valid(Redirect(key,name)),owned(valid&&key!=parent){}
+  ~ScopedRedirect(){if(owned)RegCloseKey(key);}
+private:
+  ScopedRedirect(const ScopedRedirect&);
+  ScopedRedirect& operator=(const ScopedRedirect&);
+};
 }
 #endif

@@ -170,7 +170,10 @@ OcrDocument RecognizeLocalDocument(const Image& image,const Cancellation& cancel
 #ifdef PCTOOL_OCR_EVALUATION
     timing={};auto loadStart=Clock::now();
 #endif
-    static Engine engine;
+    // Inference arenas can grow by hundreds of MiB for a single screenshot.
+    // Keep sessions scoped to this request so completed/cancelled OCR releases them.
+    if(cancel.requested)return {};
+    Engine engine;
 #ifdef PCTOOL_OCR_EVALUATION
     timing.loadMs=Elapsed(loadStart);
     PROCESS_MEMORY_COUNTERS_EX loaded{};loaded.cb=sizeof(loaded);GetProcessMemoryInfo(GetCurrentProcess(),reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&loaded),sizeof(loaded));timing.loadedWorking=loaded.WorkingSetSize;timing.loadedPrivate=loaded.PrivateUsage;

@@ -1731,6 +1731,7 @@ static void ElectronScrollTest(HWND source,const std::wstring& prefix){
         std::cerr<<"Electron pixel mismatch "<<x<<","<<y<<std::endl;throw std::runtime_error("Electron stitched text has missing/repeated rows or columns");}
     std::cout<<"ELECTRON SCROLL PASS: actual DOM scroll, 12 alternating wheels, upward prepend, repeated top/bottom, locked-list automatic restore/append, no cursor motion or source hover/click, edit handoff"<<std::endl;
 }
+void CaptureMemoryTests(bool enforce);
 int wmain(int argc,wchar_t** argv) {
 #ifdef PCTOOL_OCR_EVALUATION
     wchar_t evalModel[32768]{},evalTier[64]{};
@@ -1742,6 +1743,9 @@ int wmain(int argc,wchar_t** argv) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     const bool previewApartment=argc>1 && (std::wstring(argv[1])==L"preview-test" || std::wstring(argv[1])==L"preview-complete-fixture" || std::wstring(argv[1])==L"preview-visible-fixture");
     winrt::init_apartment(previewApartment?winrt::apartment_type::single_threaded:winrt::apartment_type::multi_threaded);
+    if(argc>1&&std::wstring(argv[1])==L"memory-test"){
+        try{CaptureMemoryTests(argc>2);return 0;}catch(const std::exception& e){std::cerr<<e.what()<<std::endl;return 1;}
+    }
     if(argc>3&&std::wstring(argv[1])==L"electron-scroll-test"){
         try{ElectronScrollTest(reinterpret_cast<HWND>(_wcstoui64(argv[2],nullptr,10)),argv[3]);return 0;}catch(const std::exception& e){std::cerr<<e.what()<<std::endl;return 1;}
     }

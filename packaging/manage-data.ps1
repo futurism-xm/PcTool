@@ -113,15 +113,27 @@ public static class DeferredDelete {
 }
 '@
 $script:pending=$false
+$script:retryDeadline=$null
 function Remove-One([string]$full,[bool]$directory){
- try{if($directory){[IO.Directory]::Delete($full,$false)}else{Remove-Item -LiteralPath $full -Force -ErrorAction Stop}}
+ while($true){
+ try{if($directory){[IO.Directory]::Delete($full,$false)}else{Remove-Item -LiteralPath $full -Force -ErrorAction Stop};return}
  catch{
+  if(!(Test-Path -LiteralPath $full)){return}
+  # Shell teardown and antivirus handles can outlive process exit briefly.
+  # One shared budget prevents a large locked tree from stalling uninstall.
+  if($null -eq $script:retryDeadline){
+   $script:retryDeadline=[DateTime]::UtcNow.AddSeconds(3)
+   Write-Output "Waiting for release before retry: $full"
+  }
+  if([DateTime]::UtcNow -lt $script:retryDeadline){Start-Sleep -Milliseconds 150;continue}
   if(![DeferredDelete]::MoveFileEx($full,[IntPtr]::Zero,4)){
    $code=[Runtime.InteropServices.Marshal]::GetLastWin32Error()
    throw "Cannot remove or schedule '$full' (Win32 $code). $($_.Exception.Message)"
   }
   Write-Output "Scheduled for deletion after restart: $full"
   $script:pending=$true
+  return
+ }
  }
 }
 function Remove-Owned([string]$relative){

@@ -31,7 +31,7 @@ function Wait-Window([string]$class,[bool]$visible=$false) {
  do {$w=[HotkeyProbe]::FindWindow($class,$null);if($w -ne [IntPtr]::Zero -and (!$visible -or [HotkeyProbe]::IsWindowVisible($w))){return $w};Start-Sleep -Milliseconds 100}while([DateTime]::UtcNow -lt $end)
  throw "Window absent: $class"
 }
-$settingsPath=Join-Path (Split-Path $Executable) ('Data/'+[Security.Principal.WindowsIdentity]::GetCurrent().User.Value+'/settings.ini')
+$settingsPath=Join-Path (Split-Path $Executable) 'Data/settings.ini'
 $original=if(Test-Path -LiteralPath $settingsPath){[IO.File]::ReadAllBytes($settingsPath)}else{$null}
 function Read-Hotkey([int]$index){$text=[IO.File]::ReadAllText($settingsPath);$match=[regex]::Match($text,"(?m)^Hotkey$index=(\d+)");if(!$match.Success){throw 'Missing setting'};return [int]$match.Groups[1].Value}
 try {

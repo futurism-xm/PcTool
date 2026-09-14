@@ -38,8 +38,8 @@ public:
         if(IsRectEmpty(&region)) { POINT p{}; GetCursorPos(&p); region={p.x-90,p.y-31,p.x+90,p.y+31}; }
         SetWindowPos(window_,HWND_TOPMOST,(region.left+region.right-Dip(180))/2,(region.top+region.bottom-Dip(62))/2,Dip(180),Dip(62),SWP_SHOWWINDOW);
         SetForegroundWindow(window_); SetTimer(window_,1,40,nullptr);
-        const auto state=workState_;
-        work_=std::async(std::launch::async,[state] {
+        auto state=workState_;
+        work_=std::async(std::launch::async,[state]() mutable {
             Recognized result; result.generation=state->cancellation.generation;
             try {
                 winrt::init_apartment(winrt::apartment_type::multi_threaded);
@@ -48,12 +48,15 @@ public:
             } catch(const winrt::hresult_error& e) { result.error=ErrorMessage(L"识别失败",e.code())+L"\n"+e.message().c_str(); }
             catch(const std::exception& e) {result.error=L"本地文字识别失败：\n"+std::wstring(winrt::to_hstring(e.what()).c_str())+L"\n请确认程序目录中的 onnxruntime.dll 和 ocr_models 文件夹完整。";}
             catch(...) { result.error=L"识别失败：图像过大或系统资源不足。"; }
+            // A closed window may retain its future until CaptureTools collects it.
+            // Do not let that completed future retain the source screenshot.
+            state.reset();
             return result;
         });
         } catch(...) { RestoreOwner(false); if(window_) DestroyWindow(window_); throw; }
     }
     ~OcrWindow() override {
-        workState_->cancellation.requested=true; RestoreOwner(false);
+        if(workState_)workState_->cancellation.requested=true; RestoreOwner(false);
         if(work_.valid()) work_.wait();
         if(window_) DestroyWindow(window_);
         if(bitmap_) DeleteObject(bitmap_); if(numberFont_) DeleteObject(numberFont_);
@@ -88,6 +91,7 @@ private:
             }
         } else { display=std::move(workState_->image); request_.imageBounds={}; }
         displayWidth_=display.width; displayHeight_=display.height; bitmap_=ToBitmap(display);
+        workState_->image={};
         if(!bitmap_) throw std::runtime_error("Cannot allocate OCR preview");
         richLibrary_=LoadLibraryW(L"Msftedit.dll"); if(!richLibrary_) throw std::runtime_error("RichEdit unavailable");
         image_=Child(L"STATIC",L"",SS_NOTIFY|WS_HSCROLL|WS_VSCROLL,ImageId);
@@ -330,7 +334,17 @@ private:
         return result;
     }
     LRESULT Handle(UINT message,WPARAM w,LPARAM l) override {
-        if(message==WM_CLOSE) { workState_->cancellation.requested=true; RestoreOwner(false); KillTimer(window_,1); return ToolWindow::Handle(message,w,l); }
+        if(message==WM_CLOSE) { if(workState_)workState_->cancellation.requested=true; RestoreOwner(false); KillTimer(window_,1); return ToolWindow::Handle(message,w,l); }
+        if(message==WM_NCDESTROY) {
+            if(workState_)workState_->cancellation.requested=true;
+            RestoreOwner(false);
+            workState_.reset(); request_.image={}; request_.background={}; document_={};
+            std::vector<CHARRANGE>().swap(ranges_);
+            if(bitmap_){DeleteObject(bitmap_);bitmap_=nullptr;}
+            if(numberFont_){DeleteObject(numberFont_);numberFont_=nullptr;}
+            image_=text_=numbers_=nullptr;
+            return ToolWindow::Handle(message,w,l);
+        }
         if(message==WM_KEYDOWN && w==VK_ESCAPE) { SendMessageW(window_,WM_CLOSE,0,0); return 0; }
         if(message==WM_TIMER) {
             if(!ready_) {

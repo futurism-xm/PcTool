@@ -26,6 +26,18 @@ if($LASTEXITCODE){throw "Isolated NSIS compilation failed: $base/compile.log"}
 $clsid='{23170F69-40C1-278A-1000-000100020000}'
 $keys=@()
 $processes=@()
+$lockedFile=$null
+function Remove-TestPending {
+ $queue=[Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SYSTEM\CurrentControlSet\Control\Session Manager',$true)
+ try {
+  $name='PendingFileRenameOperations';$entries=@($queue.GetValue($name,[string[]]@()))
+  if($entries.Count % 2){throw 'Unexpected pending operation list'}
+  $kept=[Collections.Generic.List[string]]::new()
+  $prefix='\??\'+[IO.Path]::GetFullPath($base)+'\'
+  for($i=0;$i -lt $entries.Count;$i+=2){if(!$entries[$i].StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase)){$kept.Add($entries[$i]);$kept.Add($entries[$i+1])}}
+  if($kept.Count){$queue.SetValue($name,$kept.ToArray(),[Microsoft.Win32.RegistryValueKind]::MultiString)}else{$queue.DeleteValue($name,$false)}
+ } finally {$queue.Dispose()}
+}
 try {
  foreach($previous in @($false,$true)){
   $label=if($previous){'previous-7zip'}else{'no-previous'}
@@ -52,7 +64,18 @@ try {
   for($i=0;$i -lt 60 -and !(Test-Path "$destination/$($task.Id).ready");$i++){Start-Sleep -Milliseconds 50}
   if(!(Test-Path "$destination/$($task.Id).ready")){throw 'Task fixture failed'}
   $timer=[Diagnostics.Stopwatch]::StartNew()
-  $uninstall=Start-Process -FilePath "$destination/Uninstall.exe" -ArgumentList '/S' -WindowStyle Hidden -PassThru -Wait
+  # Run a copy outside the installation with _?= to wait for the actual cleanup
+  # process. NSIS's normal self-copy launcher can return before its child finishes.
+  $uninstallRunner=Join-Path $base ("Uninstall-$label.exe")
+  Copy-Item -LiteralPath "$destination/Uninstall.exe" -Destination $uninstallRunner
+  $lockedFile=[IO.File]::Open("$destination/Data/external-lock.tmp",'Create','ReadWrite','None')
+  $uninstall=Start-Process -FilePath $uninstallRunner -ArgumentList @('/S',"_?=$destination") -WindowStyle Hidden -PassThru -Wait
+  if($uninstall.ExitCode -ne 3010){throw "Locked uninstall returned $($uninstall.ExitCode)"}
+  foreach($retryFile in @('Uninstall.exe','PcToolUninstallHelper.exe','manage-data.ps1','.pctool-managed-files.json')){
+   if(!(Test-Path (Join-Path $destination $retryFile))){throw "Retry file removed on incomplete cleanup: $retryFile"}
+  }
+  $lockedFile.Dispose();$lockedFile=$null;Remove-TestPending
+  $uninstall=Start-Process -FilePath $uninstallRunner -ArgumentList @('/S',"_?=$destination") -WindowStyle Hidden -PassThru -Wait
   if($uninstall.ExitCode -ne 0){throw "Uninstall returned $($uninstall.ExitCode)"}
   for($i=0;$i -lt 100 -and (Test-Path "$destination/Uninstall.exe");$i++){Start-Sleep -Milliseconds 100}
   if(!$task.WaitForExit(1000) -or $task.ExitCode -ne 1602){throw 'Uninstaller did not force-stop the task'}
@@ -76,6 +99,8 @@ try {
  }
  "Evidence: $base"
 } finally {
+ if($lockedFile){$lockedFile.Dispose()}
+ Remove-TestPending
  foreach($process in $processes){if(!$process.HasExited){$process.Kill();$process.WaitForExit()};$process.Dispose()}
  foreach($registry in $keys){$registry.DeleteSubKeyTree($namespace,$false);$registry.Dispose()}
 }

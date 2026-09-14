@@ -11,6 +11,11 @@ int wmain(int argc, wchar_t** argv) {
     if (argc != 3) return 1;
     std::filesystem::path root(argv[1]);
     stubborn = std::wstring(argv[2]) == L"stubborn";
+    HMODULE extension{};
+    if(std::wstring(argv[2])==L"module"){
+        extension=LoadLibraryW((root/L"modules/archive/7-zip.dll").c_str());
+        if(!extension)return 4;
+    }
     auto data = root / L"Data/test/SevenZip";
     std::filesystem::create_directories(data);
     HKEY hive{};
@@ -22,5 +27,6 @@ int wmain(int argc, wchar_t** argv) {
     std::ofstream(root / (std::to_wstring(GetCurrentProcessId()) + L".ready")) << "ready";
     MSG msg{}; while (GetMessageW(&msg, nullptr, 0, 0) > 0) { TranslateMessage(&msg); DispatchMessageW(&msg); }
     RegCloseKey(hive);
+    if(extension)FreeLibrary(extension);
     return 0;
 }

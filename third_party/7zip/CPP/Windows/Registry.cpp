@@ -39,7 +39,7 @@ LONG CKey::Create(HKEY parentKey, LPCTSTR keyName,
     LPTSTR keyClass, DWORD options, REGSAM accessMask,
     LPSECURITY_ATTRIBUTES securityAttributes, LPDWORD disposition) throw()
 {
-  if(!PcToolStorage::Redirect(parentKey,keyName))return ERROR_ACCESS_DENIED;
+  PcToolStorage::ScopedRedirect root(parentKey,keyName);if(!root.valid)return ERROR_ACCESS_DENIED;parentKey=root.key;
   MY_ASSUME(parentKey != NULL);
   DWORD dispositionReal;
   HKEY key = NULL;
@@ -57,7 +57,7 @@ LONG CKey::Create(HKEY parentKey, LPCTSTR keyName,
 
 LONG CKey::Open(HKEY parentKey, LPCTSTR keyName, REGSAM accessMask) throw()
 {
-  if(!PcToolStorage::Redirect(parentKey,keyName))return ERROR_ACCESS_DENIED;
+  PcToolStorage::ScopedRedirect root(parentKey,keyName);if(!root.valid)return ERROR_ACCESS_DENIED;parentKey=root.key;
   MY_ASSUME(parentKey != NULL);
   HKEY key = NULL;
   LONG res = RegOpenKeyEx(parentKey, keyName, 0, accessMask, &key);
