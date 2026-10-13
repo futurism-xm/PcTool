@@ -586,7 +586,11 @@ static HRESULT RETURN_WIN32_LastError_AS_HRESULT()
 Z7_COMWF_B CZipContextMenu::QueryContextMenu(HMENU hMenu, UINT indexMenu,
       UINT commandIDFirst, UINT commandIDLast, UINT flags)
 {
-  if (PcToolStorage::Uninstalling()) return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 0);
+  if (PcToolStorage::Uninstalling())
+  {
+    _commandMap.Clear();
+    return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 0);
+  }
   ODS("+ QueryContextMenu()")
   COM_TRY_BEGIN
   try {
@@ -1703,7 +1707,7 @@ Z7_COMWF_B CZipExplorerCommand::GetState(IShellItemArray * /* psiItemArray */, B
 {
   // COM_TRY_BEGIN
   ODS("- GetState()")
-  *pCmdState = ECS_ENABLED;
+  *pCmdState = PcToolStorage::Uninstalling() ? ECS_HIDDEN : ECS_ENABLED;
   return S_OK;
   // COM_TRY_END
 }
@@ -1714,6 +1718,8 @@ Z7_COMWF_B CZipExplorerCommand::GetState(IShellItemArray * /* psiItemArray */, B
 Z7_COMWF_B CZipExplorerCommand::Invoke(IShellItemArray *psiItemArray, IBindCtx * /* pbc */)
 {
   COM_TRY_BEGIN
+
+  if (PcToolStorage::Uninstalling()) return E_ACCESSDENIED;
 
   if (_commandMap_Cur.IsEmpty())
     return E_INVALIDARG;

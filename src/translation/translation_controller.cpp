@@ -3,6 +3,7 @@
 #include "translation/translation_capture.h"
 #include "translation/translation_view.h"
 #include "translation/translation_input_watch.h"
+#include "translation/clipboard_source.h"
 #include "translation/source_settings.h"
 #include "translation/source_provider.h"
 #include "translation/source_icons.h"
@@ -165,6 +166,7 @@ struct TranslationController::Impl {
     std::vector<std::future<OcrCompletion>> workers;
     enum class Pending {None,WaitKeys,PrepareCopy,Clipboard,Ocr};Pending pending{Pending::None};
     HWND target{},lastSelectionSource{};DWORD targetPid{},lastSelectionPid{},clearedSequence{};ULONGLONG deadline{};bool copyKeysDown{},readRetry{},copyListening{},transferringFocus{},copyInputPending{};
+    ClipboardSource copySource;
     InputWatch inputWatch;uint64_t copyInputSerial{};
     Impl(){Gdiplus::GdiplusStartupInput input;Gdiplus::GdiplusStartup(&gdiplus,&input,nullptr);}
     ~Impl(){Shutdown();if(gdiplus)Gdiplus::GdiplusShutdown(gdiplus);}
@@ -394,6 +396,7 @@ struct TranslationController::Impl {
         if(!value)return false;text.assign(value,wcsnlen_s(value,count));GlobalUnlock(memory);return true;
     }
     void StopCopyWatch(){
+        copySource.Reset();
         inputWatch.EndCopy();
         if(copyListening&&window)RemoveClipboardFormatListener(window);copyListening=false;readRetry=false;transferringFocus=false;copyInputPending=false;
     }
@@ -412,6 +415,7 @@ struct TranslationController::Impl {
         }
         selection.Cancel();Ensure();Replace(L"");scrollOffset=0;
         target=original;GetWindowThreadProcessId(target,&targetPid);lastSelectionSource=target;lastSelectionPid=targetPid;
+        if(!copySource.Begin(targetPid)){CopyFailed(L"无法访问取词来源进程，请回到原应用重试。");return;}
         pending=Pending::WaitKeys;deadline=GetTickCount64()+1500;
         transferringFocus=repeated||fromMenu;
         if(transferringFocus&&!SetForegroundWindow(target)){CopyFailed(L"无法激活原取词窗口，请回到原应用后重试。");return;}
@@ -430,8 +434,15 @@ struct TranslationController::Impl {
             else if(GetTickCount64()>deadline)CopyFailed(L"无法读取剪贴板，请关闭占用剪贴板的程序后重试。");
             return;
         }
-        const DWORD sequence=GetClipboardSequenceNumber();DWORD sourcePid{};GetWindowThreadProcessId(GetClipboardOwner(),&sourcePid);
-        if(sourcePid!=targetPid){CloseClipboard();Trace(L"copy-owner-rejected");CopyFailed(L"剪贴板内容来自其他程序，本次取词已取消，请重试。");return;}
+        const DWORD sequence=GetClipboardSequenceNumber();const HWND clipboardOwner=GetClipboardOwner();DWORD sourcePid{};GetWindowThreadProcessId(clipboardOwner,&sourcePid);
+        // A fully rendered clipboard can outlive its owner window. In that
+        // case correlate the new sequence with our dispatched copy and the
+        // still-active source, rather than requiring an owner that no longer exists.
+        // Known unrelated owners continue to be rejected.
+        const bool ownerlessCopy=!clipboardOwner&&SameCopyForeground(target)&&copySource.Accepts(targetPid);
+        if(!ownerlessCopy&&!copySource.Accepts(sourcePid)){CloseClipboard();Trace(sourcePid?L"copy-owner-rejected":L"copy-owner-unavailable");CopyFailed(sourcePid?L"剪贴板内容来自其他程序，本次取词已取消，请重试。":L"取词来源窗口已改变，请回到原应用重试。");return;}
+        if(ownerlessCopy)Trace(L"copy-ownerless-request-accepted");
+        else if(sourcePid!=targetPid)Trace(L"copy-helper-owner-accepted");
         std::wstring text;const bool read=ReadClipboardText(text);CloseClipboard();
         if(sequence!=GetClipboardSequenceNumber()){readRetry=true;deadline=GetTickCount64()+1500;return;}
         Trace(!read?L"copy-read-failed":HasText(text)?L"copy-text-ready":L"copy-empty");

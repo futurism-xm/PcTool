@@ -2,14 +2,43 @@
 #include "app/app_settings.h"
 #include <iostream>
 #include <thread>
+#include <algorithm>
+#include <cwctype>
 static void Check(bool value,const char* reason){if(!value)throw std::runtime_error(reason);}
 static void Modified(const std::filesystem::path& path,const SYSTEMTIME& date){
     FILETIME local{},utc{};Check(SystemTimeToFileTime(&date,&local)&&LocalFileTimeToFileTime(&local,&utc),"invalid fixture date");
     HANDLE file=CreateFileW(path.c_str(),FILE_WRITE_ATTRIBUTES,FILE_SHARE_READ,nullptr,OPEN_EXISTING,0,nullptr);
     Check(file!=INVALID_HANDLE_VALUE,"cannot timestamp fixture");const bool ok=SetFileTime(file,nullptr,nullptr,&utc)!=FALSE;CloseHandle(file);Check(ok,"timestamp failed");
 }
-int main(){
+// These fixtures avoid the process-wide clipboard and installation registry.
+static void CacheReferenceTests(){
+    GUID id{};Check(SUCCEEDED(CoCreateGuid(&id)),"cannot allocate fixture identity");
+    wchar_t suffix[40]{};StringFromGUID2(id,suffix,40);
+    const auto fixture=app_storage::Root()/(std::wstring(L"storage-core-")+suffix);
+    Check(CreateDirectoryW(fixture.c_str(),nullptr)!=FALSE,"cannot create storage fixture");
+    struct Cleanup{std::filesystem::path path;~Cleanup(){std::error_code error;std::filesystem::remove_all(path,error);}} cleanup{fixture};
+    SYSTEMTIME today{};today.wYear=2026;today.wMonth=3;today.wDay=9;
+    ULONGLONG day{};Check(app_storage::CalendarDay(today,day),"invalid cleanup date");
+    for(int variant=0;variant<4;++variant){
+        const auto root=fixture/std::to_wstring(variant);
+        const auto directory=root/L"2026-03-01/Screenshots";
+        const auto held=directory/L"keep.png",sibling=root/L"2026-03-01/Screenshots-other/remove.png";
+        app_storage::AtomicWrite(held,"clipboard directory reference");
+        app_storage::AtomicWrite(sibling,"unreferenced sibling");
+        std::wstring reference=directory.wstring();
+        if(variant==1)reference+=L"\\";
+        if(variant==2)reference=directory.generic_wstring()+L"/./";
+        if(variant==3){reference+=L"\\";std::transform(reference.begin(),reference.end(),reference.begin(),[](wchar_t c){return std::towupper(c);});}
+        const std::set<std::wstring> references{std::filesystem::path(reference).lexically_normal().wstring()};
+        app_storage::detail::CleanRoot(root,references,day);
+        Check(std::filesystem::exists(held),"cache cleanup deleted a referenced directory with a trailing separator");
+        Check(!std::filesystem::exists(sibling),"directory reference protected a sibling with the same prefix");
+    }
+    std::cout<<"PASS cache directory references, trailing separators, normalized paths, case and sibling boundaries\n";
+}
+int main(int argc,char** argv){
  try{
+    if(argc==2&&std::string(argv[1])=="--core"){CacheReferenceTests();return 0;}
     app_storage::Initialize();
     auto data=app_storage::Data(),cache=app_storage::CacheRoot();
     Check(data==app_storage::Root()/L"Data"&&cache==app_storage::Root()/L"Cache","SID layer remains in storage path");
@@ -18,6 +47,11 @@ int main(){
     const auto original=std::filesystem::current_path();std::filesystem::current_path(std::filesystem::temp_directory_path());Check(app_storage::Data()==data,"working directory changed storage root");std::filesystem::current_path(original);
     AppSettings settings;settings.SetTranslationEnabled(true);settings.SetAutoStartEnabled(false);auto keys=hotkeys::Defaults;keys[7]={MOD_CONTROL,VK_F11};settings.SetHotkeys(keys);Check(settings.Save(),"save failed");
     AppSettings restored;restored.Load();Check(restored.TranslationEnabled()&&!restored.AutoStartEnabled()&&restored.Hotkeys()==keys,"settings reload mismatch");
+    Check(restored.IsItemVisible(MonitorItem::GpuUsage),"new settings missing GPU default");
+    Check(restored.ToggleItem(MonitorItem::GpuUsage)&&restored.Save(),"GPU disable save failed");
+    AppSettings gpuDisabled;gpuDisabled.Load();Check(!gpuDisabled.IsItemVisible(MonitorItem::GpuUsage),"GPU disabled state lost");
+    Check(gpuDisabled.ToggleItem(MonitorItem::GpuUsage)&&gpuDisabled.Save(),"GPU enable save failed");
+    AppSettings gpuEnabled;gpuEnabled.Load();Check(gpuEnabled.IsItemVisible(MonitorItem::GpuUsage),"GPU enabled state lost");
     auto settingsFile=data/L"settings.ini";
     SetFileAttributesW(settingsFile.c_str(),FILE_ATTRIBUTE_READONLY);
     const bool refused=!settings.Save();SetFileAttributesW(settingsFile.c_str(),FILE_ATTRIBUTE_NORMAL);

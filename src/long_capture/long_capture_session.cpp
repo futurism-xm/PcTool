@@ -1,5 +1,7 @@
 #include "long_capture/scroll_stitcher.h"
 #include "long_capture/long_capture_session.h"
+#include "long_capture/scroll_input.h"
+#include "long_capture/scroll_trace.h"
 #include "capture/image_editor.h"
 #include "shared/ui/capture_overlay_ui.h"
 #include <winrt/base.h>
@@ -11,7 +13,6 @@ namespace {
 using namespace capture;
 constexpr UINT MouseNotice=WM_APP+81;
 constexpr int Edit=11,Cancel=12,Download=13,Finish=14;
-constexpr uint64_t MinimumStepMs=350,PendingLifetimeMs=150;
 // Hit-testable, almost transparent surface: cursor motion remains free, but
 // the source never receives hover/click messages. Wheels are sent by the gate.
 class InputShield final:public ToolWindow {
@@ -47,15 +48,24 @@ protected:
 struct ScrollInput {
     uint64_t id{},time{},lastDelivery{}; POINT point{}; int direction{},units{};
     HWND source{},target{}; DWORD process{}; RECT sourceBounds{};
+#ifdef PCTOOL_SCROLL_TRACE
+    uint64_t traceInputId{};
+#endif
 };
 struct LongState {
     std::atomic<bool> finish{},cancel{},done{};
+    std::atomic<uint64_t> inputSerial{};
     mutable std::mutex mutex; Image initial,preview,result; int height{};
     uint64_t version{},imageVersion{},completedId{},cancelledId{}; bool failed{},limited{},atEnd{},atTop{},observed{},inFlight{},frameChanged{},baselineReady{};
     ScrollAnalysis analysis; ScrollInput request; std::vector<Annotation> annotations;
     std::optional<POINT> preparationAnchor;
     StitchResult last{StitchResult::Unchanged}; std::wstring status;
+    StitchResult completedResult{StitchResult::Unchanged};ScrollAnalysis completedAnalysis;
+    uint64_t completedInputSerial{},publishedActionId{};bool completedBoundary{};
     LongCaptureMode mode{LongCaptureMode::Manual}; int restoreTargetY{}; UINT dpi{96};
+#ifdef PCTOOL_SCROLL_TRACE
+    uint64_t tracePreviewAction{},tracePreviewInput{};
+#endif
 };
 bool Moved(StitchResult r){return r==StitchResult::Appended||r==StitchResult::Prepended||r==StitchResult::Revisited;}
 bool ChangedImage(StitchResult r){return r==StitchResult::First||r==StitchResult::Appended||r==StitchResult::Prepended;}
@@ -80,19 +90,31 @@ void CaptureLong(RECT region,LongState& state) {
         std::optional<POINT> anchor;std::wstring published;const auto start=GetTickCount64();
         auto publish=[&](StitchResult result,const std::wstring& status,bool imageChanged,bool force=false){
             if(!force&&!imageChanged&&!completingId&&status==published)return;published=status;
-            Image thumbnail;if(imageChanged)thumbnail=stitcher.Preview(450,450);
+            Image thumbnail;if(imageChanged){
+                PCTOOL_SCROLL_EVENT(PreviewBegin,input.id,state.imageVersion+1,input.traceInputId,0,0,stitcher.Width(),stitcher.Height());
+                thumbnail=stitcher.Preview(450,450);
+                PCTOOL_SCROLL_EVENT(PreviewEnd,input.id,state.imageVersion+1,input.traceInputId,0,0,thumbnail.width,thumbnail.height);
+            }
             std::lock_guard<std::mutex> lock(state.mutex);
             if(completingId){
                 if(completingId<=state.cancelledId){completingId=0;atEnd=atTop=false;return;}
-                state.completedId=completingId;state.inFlight=false;completingId=0;
+                state.completedId=completingId;state.inFlight=false;
+                state.completedInputSerial=state.inputSerial.load();state.completedResult=result;
+                state.completedAnalysis=stitcher.Analysis();state.completedBoundary=atEnd||atTop;
+                PCTOOL_SCROLL_EVENT(Completed,completingId,state.imageVersion,input.traceInputId,0,0,0,0,int(result));completingId=0;
             }
-            state.last=result;state.status=status;state.height=stitcher.Height();state.limited=limited;
+            state.last=result;state.status=status;state.height=stitcher.Height();state.limited=limited;state.publishedActionId=input.id;
             state.atEnd=atEnd;state.atTop=atTop;state.analysis=stitcher.Analysis();state.analysis.result=result;
-            if(imageChanged){state.preview=std::move(thumbnail);++state.imageVersion;}++state.version;
+            if(imageChanged){state.preview=std::move(thumbnail);++state.imageVersion;
+#ifdef PCTOOL_SCROLL_TRACE
+                state.tracePreviewAction=input.id;state.tracePreviewInput=input.traceInputId;
+#endif
+            }++state.version;
+            PCTOOL_SCROLL_EVENT(Publish,input.id,state.imageVersion,input.traceInputId,0,0,stitcher.Width(),stitcher.Height(),int(result));
         };
         // Publish the action acknowledgment together with its final coordinates/result.
         auto complete=[&]{active=false;completingId=input.id;};
-        if(!state.initial.Empty()){candidate=state.initial;stitcher.Push(state.initial);state.initial={};publish(StitchResult::First,L"",true);}
+        if(!state.initial.Empty()){candidate=state.initial;PCTOOL_SCROLL_EVENT(StitchBegin,0);stitcher.Push(state.initial);PCTOOL_SCROLL_EVENT(StitchEnd,0,0,0,0,0,stitcher.Width(),stitcher.Height(),int(StitchResult::First));state.initial={};publish(StitchResult::First,L"",true);}
         while(!state.cancel){
             const auto now=GetTickCount64();bool newAction=false;
             {std::lock_guard<std::mutex> lock(state.mutex);
@@ -103,11 +125,14 @@ void CaptureLong(RECT region,LongState& state) {
             }
             if(newAction){anchor=POINT{input.point.x-region.left,input.point.y-region.top};actionBaseline=candidate;examined={};stableAt=now;boundary.Reset();atEnd=atTop=false;publish(StitchResult::Unchanged,L"",false,true);}
             Image frame;
-            if(capture.Next(frame)){
+            PCTOOL_SCROLL_EVENT(CaptureBegin,input.id,0,input.traceInputId);
+            const bool captured=capture.Next(frame);
+            PCTOOL_SCROLL_EVENT(CaptureEnd,input.id,0,input.traceInputId,0,0,frame.width,frame.height,captured?1:0);
+            if(captured){
                 liveFrame=true;
                 const auto area=stitcher.Analysis().locked?std::optional<POINT>{}:anchor;
                 if(stitcher.Difference(candidate,frame,area)>0.8)stableAt=now;
-                if(active){const bool changed=stitcher.Difference(actionBaseline,frame,area)>0.8;std::lock_guard<std::mutex> lock(state.mutex);state.frameChanged=changed;}
+                if(active){const bool changed=stitcher.Difference(actionBaseline,frame,area)>0.8;std::lock_guard<std::mutex> lock(state.mutex);if(changed&&!state.frameChanged){PCTOOL_SCROLL_EVENT(FrameChanged,input.id,0,input.traceInputId,0,0,frame.width,frame.height);}state.frameChanged=changed;}
                 candidate=std::move(frame);
             }
             // The selector's frozen image predates the shield and may contain a
@@ -115,11 +140,11 @@ void CaptureLong(RECT region,LongState& state) {
             // Establish the first stitch frame from this same live capture stream
             // BEFORE permitting any wheel delivery; never rebase after scrolling.
             if(!baselineReady&&liveFrame&&now-start>=300&&now-stableAt>=200){
-                stitcher=ScrollStitcher();const auto first=stitcher.Push(candidate);
+                stitcher=ScrollStitcher();PCTOOL_SCROLL_EVENT(StitchBegin,0);const auto first=stitcher.Push(candidate);PCTOOL_SCROLL_EVENT(StitchEnd,0,0,0,0,0,stitcher.Width(),stitcher.Height(),int(first));
                 limited=first==StitchResult::Limit;examined={};
                 publish(first,limited?L"已达到长图容量上限，可编辑、下载或完成":L"",true,true);
                 baselineReady=true;
-                std::lock_guard<std::mutex> lock(state.mutex);state.baselineReady=true;
+                std::lock_guard<std::mutex> lock(state.mutex);state.baselineReady=true;PCTOOL_SCROLL_EVENT(BaselineReady,0,state.imageVersion);
             }
             if(!baselineReady&&now-start>=2500)
                 publish(StitchResult::Unchanged,L"正在等待初始画面稳定，请稍候",false);
@@ -133,7 +158,7 @@ void CaptureLong(RECT region,LongState& state) {
                 // that this wheel moved the requested list. In particular, don't
                 // reject a queued pre-scroll frame as a failed first overlap.
                 const bool targetChanged=stitcher.Analysis().locked||stitcher.Difference(actionBaseline,candidate,anchor)>0.8;
-                if(targetChanged&&(examined.Empty()||stitcher.Difference(examined,candidate)>0.6)){result=stitcher.Push(candidate,anchor);examined=candidate;}
+                if(targetChanged&&(examined.Empty()||stitcher.Difference(examined,candidate)>0.6)){PCTOOL_SCROLL_EVENT(StitchBegin,input.id,0,input.traceInputId);result=stitcher.Push(candidate,anchor);PCTOOL_SCROLL_EVENT(StitchEnd,input.id,0,input.traceInputId,0,0,stitcher.Width(),stitcher.Height(),int(result));examined=candidate;}
                 if(Moved(result)){
                     boundary.Reset();atEnd=atTop=false;if(active)complete();
                     publish(result,L"",ChangedImage(result),true);
@@ -165,9 +190,9 @@ void CaptureLong(RECT region,LongState& state) {
             if(candidate.Empty()&&now-start>10000)throw winrt::hresult_error(E_ABORT,L"无法取得屏幕图像");
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
-        if(!state.cancel&&stitcher.Height()>0){state.result=stitcher.Flatten();stitcher.MapAnnotations(state.annotations,state.dpi);}
+        if(!state.cancel&&stitcher.Height()>0){PCTOOL_SCROLL_EVENT(FlattenBegin,input.id,0,input.traceInputId);state.result=stitcher.Flatten();PCTOOL_SCROLL_EVENT(FlattenEnd,input.id,0,input.traceInputId,0,0,state.result.width,state.result.height);stitcher.MapAnnotations(state.annotations,state.dpi);}
     }catch(...){std::lock_guard<std::mutex> lock(state.mutex);state.status=CurrentError(L"长截图采集失败");state.failed=true;
-        if(!state.cancel&&stitcher.Height()>0){try{state.result=stitcher.Flatten();stitcher.MapAnnotations(state.annotations,state.dpi);}catch(...){}}}
+        if(!state.cancel&&stitcher.Height()>0){try{PCTOOL_SCROLL_EVENT(FlattenBegin,0);state.result=stitcher.Flatten();PCTOOL_SCROLL_EVENT(FlattenEnd,0,0,0,0,0,state.result.width,state.result.height);stitcher.MapAnnotations(state.annotations,state.dpi);}catch(...){}}}
     if(apartment)winrt::uninit_apartment();state.done=true;
 }
 class SessionWindow final:public LongCaptureSession {
@@ -192,11 +217,21 @@ public:
     }
     ~SessionWindow()override{completion_={};StopHooks();state_.cancel=true;if(worker_.joinable())worker_.join();shield_.reset();toolbar_.reset();hint_.reset();label_.reset();surround_.Close();if(window_)DestroyWindow(window_);}
     bool Active()const override{return Window()&&!completed_;}
-    LongCaptureProgress Progress()const override{std::lock_guard<std::mutex> lock(state_.mutex);return {state_.height,state_.analysis,state_.status,state_.atEnd,state_.atTop,state_.mode,state_.inFlight,state_.request.id,state_.completedId,state_.restoreTargetY};}
+    LongCaptureProgress Progress()const override{return ReadProgress();}
 private:
+    struct Completion { StitchResult result{StitchResult::Unchanged};ScrollAnalysis analysis;uint64_t through{};bool boundary{}; };
+    LongCaptureProgress ReadProgress(Completion* completion=nullptr)const{
+        std::lock_guard<std::mutex> lock(state_.mutex);
+        if(completion)*completion={state_.completedResult,state_.completedAnalysis,state_.completedInputSerial,state_.completedBoundary};
+        return {state_.height,state_.analysis,state_.status,state_.atEnd,state_.atTop,state_.mode,state_.inFlight,state_.request.id,state_.completedId,state_.restoreTargetY};
+    }
+    void ClearInput(){gate_.Cancel();std::lock_guard<std::mutex> lock(inputMutex_);mailbox_.Clear();}
+    void DiscardInput(uint64_t through,int direction=0){gate_.DiscardThrough(through,direction);std::lock_guard<std::mutex> lock(inputMutex_);mailbox_.DiscardThrough(through,direction);}
     void CancelAction(){
+        ClearInput();
         std::lock_guard<std::mutex> lock(state_.mutex);
         state_.cancelledId=std::max(state_.cancelledId,state_.request.id);
+        PCTOOL_SCROLL_EVENT(Cancelled,state_.request.id);
         state_.completedId=std::max(state_.completedId,state_.request.id);state_.inFlight=false;inFlightId_=0;
     }
     void StartHooks(){
@@ -213,7 +248,7 @@ private:
         });
         if(!result.get()){if(inputWorker_.joinable())inputWorker_.join();throw std::runtime_error("Cannot observe scrolling capture input");}
     }
-    void StopMouse(){automatic_=restoring_=false;pendingDirection_=0;CancelAction();mouseEnabled_=false;}
+    void StopMouse(){mouseEnabled_=false;automatic_=restoring_=false;CancelAction();}
     void StopHooks(){StopMouse();if(inputWorker_.joinable()){PostThreadMessageW(inputThreadId_,WM_QUIT,0,0);inputWorker_.join();}}
     bool InControls(POINT p)const{RECT r{};return toolbar_&&GetWindowRect(toolbar_->Window(),&r)&&PtInRect(&r,p);}
     static LRESULT CALLBACK MouseHook(int code,WPARAM message,LPARAM data){
@@ -228,13 +263,20 @@ private:
                 if(message==WM_LBUTTONDOWN||message==WM_LBUTTONUP){if(message==WM_LBUTTONDOWN)PostMessageW(s->window_,MouseNotice,1,MAKELPARAM(e->pt.x,e->pt.y));return 1;}
                 if(message==WM_RBUTTONDOWN||message==WM_RBUTTONUP){if(message==WM_RBUTTONUP)PostMessageW(s->window_,WM_COMMAND,Cancel,0);return 1;}
                 if(message==WM_MBUTTONDOWN||message==WM_MBUTTONUP||message==WM_XBUTTONDOWN||message==WM_XBUTTONUP||message==WM_MOUSEHWHEEL)return 1;
-                if(message==WM_MOUSEWHEEL){const int delta=SHORT(HIWORD(e->mouseData));if(delta){std::lock_guard<std::mutex> lock(s->inputMutex_);s->wheelDirection_=delta>0?1:-1;s->wheelPoint_=e->pt;s->wheelTime_=GetTickCount64();if(!s->wheelNotice_){s->wheelNotice_=true;PostMessageW(s->window_,MouseNotice,2,0);}}return 1;}
+                if(message==WM_MOUSEWHEEL){const int delta=SHORT(HIWORD(e->mouseData));if(delta){std::lock_guard<std::mutex> lock(s->inputMutex_);
+                    if(!s->mouseEnabled_||s->state_.finish)return 1;
+                    scroll_input::Intent intent{delta>0?1:-1,e->pt.x,e->pt.y,GetTickCount64(),++s->state_.inputSerial};
+#ifdef PCTOOL_SCROLL_TRACE
+                    intent.traceInputId=scroll_trace::NextInputId();
+#endif
+                    PCTOOL_SCROLL_EVENT(Input,0,0,intent.traceInputId,intent.direction,std::abs(delta));
+                    if(const auto epoch=s->mailbox_.Put(intent))if(!PostMessageW(s->window_,MouseNotice,2,static_cast<LPARAM>(epoch)))s->mailbox_.Clear();}return 1;}
             }
         }return CallNextHookEx(nullptr,code,message,data);
     }
     static LRESULT CALLBACK KeyHook(int code,WPARAM message,LPARAM data){auto* s=owner_;if(code==HC_ACTION&&s&&reinterpret_cast<KBDLLHOOKSTRUCT*>(data)->vkCode==VK_ESCAPE){if(message==WM_KEYDOWN)PostMessageW(s->window_,WM_COMMAND,Cancel,0);return 1;}return CallNextHookEx(nullptr,code,message,data);}
     void Hint(const std::wstring& text,int milliseconds=3000){if(!hint_)return;hint_->Show(text,region_,work_,dpi_,true);hintUntil_=GetTickCount64()+milliseconds;}
-    void Pause(bool show=false){automatic_=restoring_=false;pendingDirection_=0;pendingReverse_=false;paused_=true;CancelAction();SetMode();if(show)Hint(L"已暂停自动滚动，单击选区继续",1600);}
+    void Pause(bool show=false){automatic_=restoring_=false;paused_=true;CancelAction();SetMode();if(show)Hint(L"已暂停自动滚动，单击选区继续",1600);}
     void SetMode(){std::lock_guard<std::mutex> lock(state_.mutex);state_.restoreTargetY=restoreTargetY_;state_.mode=state_.inFlight?LongCaptureMode::Waiting:restoring_?LongCaptureMode::Restoring:automatic_?LongCaptureMode::Automatic:paused_?LongCaptureMode::Paused:LongCaptureMode::Manual;}
     HWND TargetChild(HWND root,POINT screen){
         HWND parent=root;
@@ -268,6 +310,9 @@ private:
     bool Dispatch(int direction,int units,uint64_t id,bool supplement=false){
         const auto error=SourceError(target_);if(!error.empty()){Pause();Hint(error);return false;}
         const auto now=GetTickCount64();ScrollInput request=target_;request.id=id;request.direction=direction;request.units=units;request.time=now;request.lastDelivery=now;
+#ifdef PCTOOL_SCROLL_TRACE
+        request.traceInputId=traceDispatchInput_;
+#endif
         {std::lock_guard<std::mutex> lock(state_.mutex);
             if(supplement){
                 if(!state_.inFlight||state_.request.id!=id||state_.completedId>=id||state_.cancelledId>=id)return false;
@@ -285,16 +330,17 @@ private:
                 wheelDispatching_=true;
                 if(shield_&&shield_->OpenWheelPoint(target_.point)){
                     if(GetAncestor(WindowFromPoint(target_.point),GA_ROOT)==target_.source){
+                        PCTOOL_SCROLL_EVENT(Dispatch,id,0,state_.request.traceInputId,direction,units,0,0,0,supplement);
                         DWORD_PTR result{};sent=SendMessageTimeoutW(target_.target,WM_MOUSEWHEEL,key,MAKELPARAM(target_.point.x,target_.point.y),SMTO_ABORTIFHUNG|SMTO_BLOCK|SMTO_ERRORONEXIT,100,&result)!=0;
                     }
                     shield_->CloseWheelPoint();
                 }
                 wheelDispatching_=false;
-            }else sent=PostMessageW(target_.target,WM_MOUSEWHEEL,key,MAKELPARAM(target_.point.x,target_.point.y))!=0;
+            }else {PCTOOL_SCROLL_EVENT(Dispatch,id,0,state_.request.traceInputId,direction,units,0,0,0,supplement);sent=PostMessageW(target_.target,WM_MOUSEWHEEL,key,MAKELPARAM(target_.point.x,target_.point.y))!=0;}
             if(!sent){
                 state_.inFlight=false;state_.completedId=id;state_.cancelledId=id;
             }else{
-                lastDispatch_=now;if(!supplement){inFlightId_=id;issuedDirection_=direction;issuedUnits_=units;issuedAt_=now;}
+                gate_.Delivered(id,now);if(!supplement){inFlightId_=id;issuedDirection_=direction;issuedUnits_=units;}
                 else issuedUnits_+=units;
                 state_.mode=LongCaptureMode::Waiting;
                 return true;
@@ -302,64 +348,71 @@ private:
         }
             Pause();Hint(L"无法向来源窗口发送滚动，已暂停");return false;
     }
-    void RequestManual(int direction,POINT point,uint64_t time){
+    void RequestManual(scroll_input::Intent intent){
+        const POINT point{intent.x,intent.y};
         {std::lock_guard<std::mutex> lock(state_.mutex);state_.preparationAnchor=POINT{point.x-region_.left,point.y-region_.top};}
         automatic_=restoring_=false;paused_=false;
-        // A boundary acknowledgment may still be waiting for the UI timer.
-        // Consume it before storing this NEW gesture, otherwise Advance clears
-        // the new direction as if it belonged to the completed boundary action.
-        if(inFlightId_&&Progress().completedActionId>=inFlightId_){pendingDirection_=0;Advance();}
-        pendingReverse_=inFlightId_&&direction!=issuedDirection_;
-        pendingDirection_=direction;pendingPoint_=point;pendingAt_=time;SetMode();Advance();
+        // Store before reconciling completion: its hook serial distinguishes a
+        // queued pre-boundary gesture from a genuinely new retry afterwards.
+        gate_.Store(intent);SetMode();Advance();
     }
     void ToggleAutomatic(POINT point){
-        const auto latest=Progress();
-        if(inFlightId_&&latest.completedActionId>=inFlightId_&&(latest.atTop||latest.atEnd)){automatic_=restoring_=false;pendingDirection_=0;Advance();}
+        // Apply the prior outcome without dispatching anything. A new click
+        // after a failure/boundary is an explicit retry, even before the timer.
+        Completion completion;auto progress=ReadProgress(&completion);Reconcile(progress,completion);
         if(automatic_||restoring_){Pause(true);return;}
-        auto progress=Progress();if(!ResolveTarget(point,progress.analysis)){Pause();return;}
+        if(!ResolveTarget(point,progress.analysis)){Pause();return;}
         {std::lock_guard<std::mutex> lock(state_.mutex);state_.preparationAnchor=POINT{target_.point.x-region_.left,target_.point.y-region_.top};}
         SetForegroundWindow(target_.source);if(GetForegroundWindow()!=target_.source){Pause();Hint(L"无法激活目标窗口，已暂停");return;}
         const auto error=SourceError(target_);if(!error.empty()){Pause();Hint(error);return;}
-        pendingDirection_=0;automatic_=true;paused_=false;restoreTargetY_=progress.analysis.locked?progress.analysis.maxY-progress.analysis.viewportHeight:0;
+        gate_.ClearPending();automatic_=true;paused_=false;restoreTargetY_=progress.analysis.locked?progress.analysis.maxY-progress.analysis.viewportHeight:0;
         restoring_=progress.analysis.locked&&progress.analysis.currentY<restoreTargetY_;
         Hint(restoring_?L"正在返回上次向下截取的位置，单击停止":L"正在自动向下截取，单击停止",1600);SetMode();Advance();
     }
-    void Advance(){
-        if(action_||completed_||state_.done)return;
-        {std::lock_guard<std::mutex> lock(state_.mutex);if(!state_.baselineReady)return;}
-        const auto now=GetTickCount64();auto progress=Progress();
+    void Reconcile(const LongCaptureProgress& progress,const Completion& completion){
         if(inFlightId_&&progress.completedActionId>=inFlightId_){
-            if(Moved(progress.analysis.result)&&progress.analysis.displacement){
-                pixelsPerUnit_=double(std::abs(progress.analysis.displacement))/std::max(1,issuedUnits_);
-                if(progress.analysis.viewportHeight>0){const int desired=int(progress.analysis.viewportHeight/5.0/std::max(0.01,pixelsPerUnit_));wheelUnits_=std::clamp((desired/15)*15,15,60);}
+            gate_.Completed(inFlightId_,Moved(completion.result));
+            if(Moved(completion.result)&&completion.analysis.displacement){
+                pixelsPerUnit_=double(std::abs(completion.analysis.displacement))/std::max(1,issuedUnits_);
+                if(completion.analysis.viewportHeight>0){const int desired=int(completion.analysis.viewportHeight/5.0/std::max(0.01,pixelsPerUnit_));wheelUnits_=std::clamp((desired/15)*15,15,60);}
             }
             inFlightId_=0;
-            if(Failure(progress.analysis.result)){automatic_=restoring_=false;pendingDirection_=0;pendingReverse_=false;paused_=true;}
-            else if(progress.atEnd||progress.atTop){
+            if(Failure(completion.result)){automatic_=restoring_=false;DiscardInput(completion.through);paused_=true;}
+            else if(completion.boundary){
                 automatic_=restoring_=false;paused_=true;
-                if(!pendingReverse_)pendingDirection_=0;
+                DiscardInput(completion.through,issuedDirection_);
             }
             if(automatic_){restoreTargetY_=progress.analysis.maxY-progress.analysis.viewportHeight;restoring_=progress.analysis.currentY<restoreTargetY_;}
             SetMode();
         }
+    }
+    void Advance(){
+        if(action_||completed_||state_.done)return;
+        {std::lock_guard<std::mutex> lock(state_.mutex);if(!state_.baselineReady)return;}
+        const auto now=GetTickCount64();Completion completion;auto progress=ReadProgress(&completion);Reconcile(progress,completion);
         if(inFlightId_){
-            bool changed{};uint64_t delivery{};{std::lock_guard<std::mutex> lock(state_.mutex);changed=state_.frameChanged;delivery=state_.request.lastDelivery;}
+            bool changed{};{std::lock_guard<std::mutex> lock(state_.mutex);changed=state_.frameChanged;}
             // Legacy controls accumulate wheel deltas until a full 120-unit notch.
             // Complete that notch within the same action instead of reporting a false edge.
-            if(issuedUnits_<120&&!changed&&now-delivery>=MinimumStepMs)Dispatch(issuedDirection_,120-issuedUnits_,inFlightId_,true);
+            if(gate_.CanSupplement(now,issuedUnits_,changed))Dispatch(issuedDirection_,120-issuedUnits_,inFlightId_,true);
             return;
         }
-        if(now-lastDispatch_<MinimumStepMs)return;
-        if(pendingDirection_){
-            const int direction=pendingDirection_;pendingDirection_=0;
-            // Preserve the one initial wheel intent while the live baseline is
-            // being prepared. Later burst input keeps its normal short lifetime.
-            if(lastDispatch_&&!pendingReverse_&&now-pendingAt_>PendingLifetimeMs){SetMode();return;}
-            pendingReverse_=false;
-            if(!ResolveTarget(pendingPoint_,progress.analysis)){Pause();return;}
-            if(!Dispatch(direction,wheelUnits_,++inputId_))Pause();return;
+        // Hook input newer than the UI's slot wins, including over automatic
+        // continuation. Its posted notice will transfer the latest intent.
+        {std::lock_guard<std::mutex> lock(inputMutex_);if(mailbox_.Pending())return;}
+        if(!gate_.CanDispatch(now))return;
+        if(const auto intent=gate_.Take()){
+            automatic_=restoring_=false;paused_=false;
+#ifdef PCTOOL_SCROLL_TRACE
+            traceDispatchInput_=intent->traceInputId;
+#endif
+            if(!ResolveTarget({intent->x,intent->y},progress.analysis)){Pause();return;}
+            if(!Dispatch(intent->direction,wheelUnits_,++inputId_))Pause();return;
         }
         if(automatic_){
+#ifdef PCTOOL_SCROLL_TRACE
+            traceDispatchInput_=0;
+#endif
             if(progress.analysis.locked){target_.point={region_.left+(progress.analysis.region.left+progress.analysis.region.right)/2,region_.top+(progress.analysis.region.top+progress.analysis.region.bottom)/2};restoreTargetY_=progress.analysis.maxY-progress.analysis.viewportHeight;restoring_=progress.analysis.currentY<restoreTargetY_;}
             int units=wheelUnits_;
             if(restoring_&&pixelsPerUnit_>0)units=std::clamp(int((restoreTargetY_-progress.analysis.currentY)/pixelsPerUnit_/15)*15,15,wheelUnits_);
@@ -400,11 +453,20 @@ private:
     void Tick(){
         if(processing_||completed_)return;
         struct Guard{bool& flag;Guard(bool& f):flag(f){flag=true;}~Guard(){flag=false;}} guard(processing_);
-        int height{};bool observed{};uint64_t version{},imageVersion{};std::wstring status;StitchResult last;
-        {std::lock_guard<std::mutex> lock(state_.mutex);height=state_.height;observed=state_.observed;version=state_.version;imageVersion=state_.imageVersion;status=state_.status;last=state_.last;if(imageVersion!=previewVersion_)preview_=state_.preview;}
+        int height{};bool observed{},passiveFailure{};uint64_t version{},imageVersion{};std::wstring status;
+        {std::lock_guard<std::mutex> lock(state_.mutex);height=state_.height;observed=state_.observed;version=state_.version;imageVersion=state_.imageVersion;status=state_.status;
+            // Completed failures are reconciled by Advance with their input
+            // cutoff. A delayed UI paint must not erase a later retry gesture.
+            passiveFailure=Failure(state_.last)&&state_.publishedActionId==state_.request.id&&
+                !(state_.completedId==state_.publishedActionId&&Failure(state_.completedResult));
+            if(imageVersion!=previewVersion_){preview_=state_.preview;
+#ifdef PCTOOL_SCROLL_TRACE
+            tracePaintAction_=state_.tracePreviewAction;tracePaintInput_=state_.tracePreviewInput;
+#endif
+        }}
         if(imageVersion!=previewVersion_){previewVersion_=imageVersion;PreviewLayout();label_->Show(std::to_wstring(region_.right-region_.left)+L" × "+std::to_wstring(height),region_,work_,dpi_,false);}
         if(version!=version_){version_=version;
-            if(!status.empty()){if(Failure(last))Pause();Hint(status);}
+            if(!status.empty()){if(passiveFailure)Pause();Hint(status);}
             else if(observed){ShowWindow(hint_->Window(),SW_HIDE);hintUntil_=0;}
         }
         Advance();
@@ -425,11 +487,11 @@ private:
     LRESULT Handle(UINT m,WPARAM w,LPARAM l)override{
         if(m==WM_TIMER){Tick();return 0;}
         if(m==WM_ERASEBKGND)return 1;
-        if(m==WM_PAINT||m==WM_PRINTCLIENT){PAINTSTRUCT ps{};HDC dc=m==WM_PAINT?BeginPaint(window_,&ps):reinterpret_cast<HDC>(w);RECT r{};GetClientRect(window_,&r);if(!preview_.Empty()){BITMAPINFO bi{};bi.bmiHeader={sizeof(BITMAPINFOHEADER),preview_.width,-preview_.height,1,32,BI_RGB};SetStretchBltMode(dc,HALFTONE);StretchDIBits(dc,0,0,r.right,r.bottom,0,0,preview_.width,preview_.height,preview_.pixels.data(),&bi,DIB_RGB_COLORS,SRCCOPY);}HBRUSH line=CreateSolidBrush(RGB(40,190,220));FrameRect(dc,&r,line);DeleteObject(line);if(m==WM_PAINT)EndPaint(window_,&ps);return 0;}
+        if(m==WM_PAINT||m==WM_PRINTCLIENT){PAINTSTRUCT ps{};HDC dc=m==WM_PAINT?BeginPaint(window_,&ps):reinterpret_cast<HDC>(w);RECT r{};GetClientRect(window_,&r);if(!preview_.Empty()){BITMAPINFO bi{};bi.bmiHeader={sizeof(BITMAPINFOHEADER),preview_.width,-preview_.height,1,32,BI_RGB};SetStretchBltMode(dc,HALFTONE);StretchDIBits(dc,0,0,r.right,r.bottom,0,0,preview_.width,preview_.height,preview_.pixels.data(),&bi,DIB_RGB_COLORS,SRCCOPY);}HBRUSH line=CreateSolidBrush(RGB(40,190,220));FrameRect(dc,&r,line);DeleteObject(line);if(m==WM_PAINT){EndPaint(window_,&ps);PCTOOL_SCROLL_EVENT(Paint,tracePaintAction_,previewVersion_,tracePaintInput_,0,0,preview_.width,preview_.height);}return 0;}
         if(m==MouseNotice){
             if(action_||state_.done)return 0;
             if(w==1)ToggleAutomatic({GET_X_LPARAM(l),GET_Y_LPARAM(l)});
-            else if(w==2){int direction{};POINT point{};uint64_t time{};{std::lock_guard<std::mutex> lock(inputMutex_);wheelNotice_=false;direction=wheelDirection_;point=wheelPoint_;time=wheelTime_;}RequestManual(direction,point,time);}
+            else if(w==2){std::optional<scroll_input::Intent> intent;{std::lock_guard<std::mutex> lock(inputMutex_);intent=mailbox_.Take(static_cast<uint64_t>(l));}if(intent)RequestManual(*intent);}
             else if(w==3)Pause();return 0;
         }
         if(m==WM_COMMAND){Command(LOWORD(w));return 0;}
@@ -439,12 +501,15 @@ private:
     }
     RECT region_{},work_{},monitor_{};CaptureSurround surround_;std::unique_ptr<InputShield> shield_;std::unique_ptr<OverlayToolbar> toolbar_;std::unique_ptr<CaptureLabel> label_,hint_;
     std::shared_ptr<ImageDocument> document_;std::function<void(bool)> completion_;std::function<void(std::shared_ptr<ImageDocument>)> open_;
-    bool processing_{},completed_{},automatic_{},restoring_{},paused_{},resultReady_{},failureReported_{},pendingReverse_{},wheelNotice_{};
-    int action_{},wheelDirection_{},pendingDirection_{},wheelUnits_{30},issuedDirection_{},issuedUnits_{},restoreTargetY_{};
-    uint64_t version_{},previewVersion_{},hintUntil_{},inputId_{},inFlightId_{},lastDispatch_{},issuedAt_{},pendingAt_{},wheelTime_{};
-    POINT wheelPoint_{},pendingPoint_{};double pixelsPerUnit_{};ScrollInput target_;
+    bool processing_{},completed_{},automatic_{},restoring_{},paused_{},resultReady_{},failureReported_{};
+    int action_{},wheelUnits_{30},issuedDirection_{},issuedUnits_{},restoreTargetY_{};
+    uint64_t version_{},previewVersion_{},hintUntil_{},inputId_{},inFlightId_{};
+    double pixelsPerUnit_{};ScrollInput target_;scroll_input::Gate gate_;scroll_input::Mailbox mailbox_;
     LongState state_;Image preview_;std::thread worker_,inputWorker_;std::mutex inputMutex_;std::atomic<bool> mouseEnabled_{true},wheelDispatching_{false};DWORD inputThreadId_{};
     HHOOK mouse_{},keyboard_{};inline static thread_local SessionWindow* owner_{};
+#ifdef PCTOOL_SCROLL_TRACE
+    uint64_t traceDispatchInput_{},tracePaintAction_{},tracePaintInput_{};
+#endif
 };
 }
 namespace capture {

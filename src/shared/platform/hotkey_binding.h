@@ -8,11 +8,11 @@ struct Binding {
     bool operator==(const Binding& other) const {return modifiers==other.modifiers&&key==other.key;}
     bool operator!=(const Binding& other) const {return !(*this==other);}
 };
-enum class Action : size_t { Screenshot,Clipboard,InputTranslation,CaptureTranslation,SelectionTranslation,TaskManager,Paint,Archive,Settings,Count };
+enum class Action : size_t { Screenshot,Clipboard,InputTranslation,CaptureTranslation,SelectionTranslation,TaskManager,Paint,Archive,Settings,RemoteDesktop,Count };
 using Bindings=std::array<Binding,size_t(Action::Count)>;
-inline constexpr Bindings Defaults{{{MOD_CONTROL|MOD_ALT,'A'},{MOD_ALT,'C'},{MOD_ALT,'Q'},{MOD_ALT,'W'},{MOD_ALT,'E'},{},{},{},{}}};
-inline constexpr const wchar_t* Names[]={L"屏幕截图",L"剪切板历史",L"输入翻译",L"截图翻译",L"划词翻译",L"任务管理器",L"调用画图",L"7-zip",L"快捷键管理"};
-inline constexpr size_t DisplayOrder[]={2,3,4,0,5,1,6,7,8};
+inline constexpr Bindings Defaults{{{MOD_CONTROL|MOD_ALT,'A'},{MOD_ALT,'C'},{MOD_ALT,'Q'},{MOD_ALT,'W'},{MOD_ALT,'E'},{},{},{},{},{}}};
+inline constexpr const wchar_t* Names[]={L"屏幕截图",L"剪切板历史",L"输入翻译",L"截图翻译",L"划词翻译",L"任务管理器",L"调用画图",L"7-zip",L"快捷键管理",L"远程连接"};
+inline constexpr size_t DisplayOrder[]={2,3,4,0,5,9,1,6,7,8};
 inline bool Empty(Binding b){return b.key==0&&b.modifiers==0;}
 inline bool Valid(Binding b){
     if(Empty(b))return true;

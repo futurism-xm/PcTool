@@ -1,9 +1,23 @@
 #include "monitor/taskbar_monitor_window.h"
 #include "app/app_messages.h"
+#include "shared/platform/app_storage.h"
 #include <stdexcept>
 #include <iostream>
 #include <set>
 struct TaskbarLayoutTest {
+    static inline bool saveFailureShown=false;
+    static void CALLBACK DismissSaveFailure(HWND,UINT,UINT_PTR,DWORD) {
+        // CTest can start this process with SW_HIDE: the modal dialog need
+        // not activate, so an activation hook cannot reliably dismiss it.
+        EnumThreadWindows(GetCurrentThreadId(),[](HWND window,LPARAM)->BOOL {
+            wchar_t name[32]{};GetClassNameW(window,name,32);
+            if(wcscmp(name,L"#32770")==0) {
+                saveFailureShown=true;
+                PostMessageW(window,WM_CLOSE,0,0);
+            }
+            return TRUE;
+        },0);
+    }
     static inline int menuStep=0;
     static inline bool hotkeyWithMenu=false,menuFailure=false;
     static inline bool sourcesRequested=false;
@@ -34,8 +48,9 @@ struct TaskbarLayoutTest {
                     if(item.wID!=4203||!item.hSubMenu||owner->MenuCommandAtPoint({r.left+45,(r.top+r.bottom)/2})!=4203||owner->MenuCommandAtPoint({r.right-5,(r.top+r.bottom)/2})!=0)menuFailure=true;
                     wchar_t label[128]{};GetMenuStringW(owner->contextMenu_,1,label,128,MF_BYPOSITION);if(wcscmp(label,L"中英翻译")!=0||GetMenuItemCount(owner->translationMenu_)!=5)menuFailure=true;
                     for(int i=0;i<3;++i)if(GetMenuItemID(owner->translationMenu_,i)!=4220+UINT(i))menuFailure=true;
-                    MENUITEMINFOW separator{sizeof(separator)};separator.fMask=MIIM_FTYPE;GetMenuItemInfoW(owner->contextMenu_,8,TRUE,&separator);
-                    if(!(separator.fType&MFT_SEPARATOR)||GetMenuItemID(owner->contextMenu_,7)!=4207||GetMenuItemID(owner->contextMenu_,9)!=4210||GetMenuItemID(owner->contextMenu_,10)!=4201)menuFailure=true;
+                    MENUITEMINFOW separator{sizeof(separator)};separator.fMask=MIIM_FTYPE;GetMenuItemInfoW(owner->contextMenu_,10,TRUE,&separator);
+                    if(!(separator.fType&MFT_SEPARATOR)||GetMenuItemID(owner->contextMenu_,9)!=4207||GetMenuItemID(owner->contextMenu_,11)!=4210||GetMenuItemID(owner->contextMenu_,12)!=4201)menuFailure=true;
+                    if(GetMenuItemID(owner->contextMenu_,4)!=4200||GetMenuItemID(owner->contextMenu_,5)!=4212||GetMenuItemID(owner->contextMenu_,6)!=4211)menuFailure=true;
                 }
                 std::set<UINT> commands;
                 if(auto* owner=TaskbarMonitorWindow::activeMenuOwner_) for(int i=0;i<GetMenuItemCount(owner->contextMenu_);++i) {
@@ -84,29 +99,51 @@ struct TaskbarLayoutTest {
         if(menuFailure || !hotkeyWithMenu||!sourcesRequested) throw std::runtime_error("Menu input, split arrow hit or translation settings dispatch failed");
         std::cout<<"MENU PASS: ordinary keys, Alt, screenshot chord, Escape, outside click, translation text/arrow hit and settings submenu dispatch\n";
     }
-    static void Run() {
-        // Redirect HKCU in this test process only; never modify the user's settings.
-        const auto testKey=L"Software\\PcToolMonitorTest-"+std::to_wstring(GetCurrentProcessId());
-        HKEY isolated{};
-        if(RegCreateKeyExW(HKEY_CURRENT_USER,testKey.c_str(),0,nullptr,0,KEY_ALL_ACCESS,nullptr,&isolated,nullptr)!=ERROR_SUCCESS)
-            throw std::runtime_error("Cannot create isolated settings fixture");
-        if(RegOverridePredefKey(HKEY_CURRENT_USER,isolated)!=ERROR_SUCCESS){RegCloseKey(isolated);throw std::runtime_error("Cannot isolate settings");}
+    static void Run(bool layoutOnly = false) {
+        if (!layoutOnly) {
+        // The PowerShell runner copies this executable into a unique directory.
+        // Settings now live beside the executable, so redirecting HKCU is insufficient.
+        if(!std::filesystem::exists(app_storage::Root()/L".pctool-settings-fixture"))
+            throw std::runtime_error("Run persistence tests with run_taskbar_tests.ps1");
+        const auto settingsFile=app_storage::Data()/L"settings.ini";
         AppSettings saved; saved.Load();bool persistenceOk=saved.MonitorInTaskbar();
         persistenceOk=hotkeys::Valid(saved.Hotkeys())&&saved.Hotkeys()==hotkeys::Defaults&&persistenceOk;
-        auto custom=hotkeys::Defaults;custom[4]={MOD_CONTROL|MOD_SHIFT,'T'};saved.SetHotkeys(custom);
+        auto custom=hotkeys::Defaults;custom[4]={MOD_CONTROL|MOD_SHIFT,'T'};custom[9]={MOD_CONTROL|MOD_ALT,'R'};saved.SetHotkeys(custom);
         saved.SetMonitorInTaskbar(false);persistenceOk=saved.Save()&&persistenceOk;
         AppSettings loaded;loaded.Load();persistenceOk=!loaded.MonitorInTaskbar()&&persistenceOk;
         persistenceOk=loaded.Hotkeys()==custom&&persistenceOk;
         // A five-entry installation must retain its old meanings; new actions default unbound.
-        HKEY legacy{};if(RegOpenKeyExW(HKEY_CURRENT_USER,L"Software\\PcTool",0,KEY_SET_VALUE,&legacy)==ERROR_SUCCESS){for(int i=5;i<9;++i)RegDeleteValueW(legacy,(L"Hotkey"+std::to_wstring(i)).c_str());RegCloseKey(legacy);}else persistenceOk=false;
-        AppSettings upgraded;upgraded.Load();persistenceOk=upgraded.Hotkeys()==custom&&persistenceOk;
+        auto legacyBindings=custom;
+        for(size_t i=5;i<legacyBindings.size();++i){
+            persistenceOk=WritePrivateProfileStringW(L"PcTool",(L"Hotkey"+std::to_wstring(i)).c_str(),nullptr,settingsFile.c_str())&&persistenceOk;
+            legacyBindings[i]={};
+        }
+        AppSettings upgraded;upgraded.Load();persistenceOk=upgraded.Hotkeys()==legacyBindings&&persistenceOk;
         for(int i=5;i<9;++i)custom[i]={MOD_CONTROL|MOD_ALT|MOD_SHIFT,UINT(VK_F13+i-5)};
         loaded.SetHotkeys(custom);persistenceOk=loaded.Save()&&persistenceOk;upgraded.Load();persistenceOk=upgraded.Hotkeys()==custom&&persistenceOk;
         loaded.SetHotkeys({});persistenceOk=loaded.Save()&&persistenceOk;upgraded.Load();persistenceOk=upgraded.Hotkeys()==hotkeys::Bindings{}&&persistenceOk;
         loaded.SetMonitorInTaskbar(true);persistenceOk=loaded.Save()&&persistenceOk;
         AppSettings restored;restored.Load();persistenceOk=restored.MonitorInTaskbar()&&persistenceOk;
-        RegOverridePredefKey(HKEY_CURRENT_USER,nullptr);RegCloseKey(isolated);RegDeleteTreeW(HKEY_CURRENT_USER,testKey.c_str());
         if(!persistenceOk)throw std::runtime_error("Monitor placement default or persistence failed");
+        TaskbarMonitorWindow saveMonitor(GetModuleHandleW(nullptr),restored);
+        const bool previous=restored.IsItemVisible(MonitorItem::CpuUsage);
+        const DWORD attributes=GetFileAttributesW(settingsFile.c_str());
+        if(attributes==INVALID_FILE_ATTRIBUTES||!SetFileAttributesW(settingsFile.c_str(),attributes|FILE_ATTRIBUTE_READONLY))
+            throw std::runtime_error("Cannot make settings fixture read-only");
+        const UINT_PTR timer=SetTimer(nullptr,0,10,DismissSaveFailure);
+        if(!timer){SetFileAttributesW(settingsFile.c_str(),attributes);throw std::runtime_error("Cannot dismiss save failure dialog");}
+        saveFailureShown=false;
+        saveMonitor.HandleMenuCommand(4102);
+        KillTimer(nullptr,timer);SetFileAttributesW(settingsFile.c_str(),attributes);
+        AppSettings unchanged;unchanged.Load();
+        if(!saveFailureShown||restored.IsItemVisible(MonitorItem::CpuUsage)!=previous||unchanged.IsItemVisible(MonitorItem::CpuUsage)!=previous)
+            throw std::runtime_error("Failed monitor save changed settings or omitted the error");
+        saveMonitor.HandleMenuCommand(4102);
+        AppSettings changed;changed.Load();
+        if(restored.IsItemVisible(MonitorItem::CpuUsage)==previous||changed.IsItemVisible(MonitorItem::CpuUsage)==previous)
+            throw std::runtime_error("Monitor save retry did not persist");
+        std::cout<<"SETTINGS PASS: isolated INI roundtrip, legacy hotkeys, save failure rollback and retry\n";
+        }
         AppSettings settings;
         auto instance=GetModuleHandleW(nullptr);
         TaskbarMonitorWindow monitor(instance,settings);
@@ -123,7 +160,7 @@ struct TaskbarLayoutTest {
         monitor.window_=CreateWindowExW(0,L"PcTool.TaskbarMonitor",L"",WS_CHILD|WS_VISIBLE,0,0,1,1,parent,nullptr,instance,&monitor);
         const HWND existingMonitor=monitor.window_;
         if(!monitor.Create(shell)||monitor.window_!=existingMonitor)throw std::runtime_error("Repeated Create rebuilt the attached monitor");
-        constexpr MonitorItem items[]={MonitorItem::UploadSpeed,MonitorItem::DownloadSpeed,MonitorItem::CpuUsage,MonitorItem::MemoryUsage,MonitorItem::CpuFrequency};
+        constexpr MonitorItem items[]={MonitorItem::UploadSpeed,MonitorItem::DownloadSpeed,MonitorItem::CpuUsage,MonitorItem::GpuUsage,MonitorItem::MemoryUsage,MonitorItem::CpuFrequency};
         for(UINT dpi:{96,144,192}) {
             monitor.dpi_=dpi; monitor.RecreateFont();
             NONCLIENTMETRICSW menuMetrics{sizeof(menuMetrics)};
@@ -138,9 +175,9 @@ struct TaskbarLayoutTest {
             SelectObject(menuDc,oldMenuFont); DeleteObject(menuFont); ReleaseDC(shell,menuDc);
             if(gap.cx!=monitor.Scale(5)) throw std::runtime_error("Native menu shortcut gap is not 5 DIP");
 
-            for(int mask=1;mask<32;++mask) {
-                for(int i=0;i<5;++i) if((mask&(1<<i)) && !settings.IsItemVisible(items[i])) settings.ToggleItem(items[i]);
-                for(int i=0;i<5;++i) if(!(mask&(1<<i)) && settings.IsItemVisible(items[i])) settings.ToggleItem(items[i]);
+            for(int mask=1;mask<64;++mask) {
+                for(int i=0;i<6;++i) if((mask&(1<<i)) && !settings.IsItemVisible(items[i])) settings.ToggleItem(items[i]);
+                for(int i=0;i<6;++i) if(!(mask&(1<<i)) && settings.IsItemVisible(items[i])) settings.ToggleItem(items[i]);
                 for(int trayX:{2500,2200,2700}) {
                     MoveWindow(tray,trayX,0,3000-trayX,100,FALSE);
                     monitor.AdjustClassicTaskbar(false);
@@ -160,11 +197,11 @@ struct TaskbarLayoutTest {
             }
         }
         monitor.Destroy(); DestroyWindow(shell);
-        std::cout<<"TASKBAR PASS: 31 item combinations, 3 DPI values, changing tray, nonzero parent offset, stable bounds and full text\n";
+        std::cout<<"TASKBAR PASS: 63 item combinations, 3 DPI values, changing tray, nonzero parent offset, stable bounds and full text\n";
     }
 };
-int main(int argc,char**) {
+int main(int argc,char** argv) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-    try { if(argc>1) TaskbarLayoutTest::RunMenu(); else TaskbarLayoutTest::Run(); return 0; }
+    try { if(argc>1 && std::string(argv[1])=="--layout-only") TaskbarLayoutTest::Run(true); else if(argc>1) TaskbarLayoutTest::RunMenu(); else TaskbarLayoutTest::Run(); return 0; }
     catch(const std::exception& e) { std::cerr<<e.what()<<'\n'; return 1; }
 }

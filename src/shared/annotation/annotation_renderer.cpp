@@ -3,7 +3,20 @@
 #include "shared/platform/capture_platform.h"
 #include <objidl.h>
 #include <gdiplus.h>
+#include <stdexcept>
 namespace capture {
+namespace {
+void ReadRenderedBitmap(HBITMAP bitmap,Image& image) {
+    // ToBitmap creates a top-down 32-bit DIB. Read it into the caller's existing
+    // pixels instead of allocating another full image through GetDIBits.
+    BITMAP surface{};
+    if(!GetObjectW(bitmap,sizeof(surface),&surface) || !surface.bmBits ||
+       surface.bmWidth!=image.width || surface.bmHeight!=image.height || surface.bmWidthBytes!=image.width*4 || !GdiFlush())
+        throw std::runtime_error("Cannot read rendered annotation pixels");
+    const auto* pixels=static_cast<const uint32_t*>(surface.bmBits);
+    std::transform(pixels,pixels+image.pixels.size(),image.pixels.begin(),[](uint32_t pixel){return pixel|0xff000000;});
+}
+}
 AnnotationRenderer::AnnotationRenderer(UINT dpi):dpi_(dpi) { Gdiplus::GdiplusStartupInput input; Gdiplus::GdiplusStartup(&gdiplusToken_,&input,nullptr); }
 AnnotationRenderer::~AnnotationRenderer() { if(gdiplusToken_) Gdiplus::GdiplusShutdown(gdiplusToken_); }
 void AnnotationRenderer::SetDpi(UINT dpi) { dpi_=dpi; }
@@ -17,7 +30,7 @@ void AnnotationRenderer::Composite(Image& image,const std::vector<Annotation>& a
     if(annotations.empty()) return;
     HBITMAP bitmap=ToBitmap(image); HDC dc=CreateCompatibleDC(nullptr); auto old=SelectObject(dc,bitmap);
     Draw(dc,annotations); SelectObject(dc,old); DeleteDC(dc);
-    try { image=FromBitmap(bitmap); } catch(...) { DeleteObject(bitmap); throw; } DeleteObject(bitmap);
+    try { ReadRenderedBitmap(bitmap,image); } catch(...) { DeleteObject(bitmap); throw; } DeleteObject(bitmap);
 }
 int AnnotationRenderer::HitSelection(RECT r,POINT p,RECT monitor) {
     (void)monitor;
@@ -57,7 +70,7 @@ static void DrawRecording(Image& image,const RecordingAnnotations& snapshot,Anno
     HDC dc=CreateCompatibleDC(nullptr); auto old=SelectObject(dc,bitmap);
     renderer.Draw(dc,snapshot.shapes,x,y); DrawLaser(dc,laser,x,y);
     SelectObject(dc,old); DeleteDC(dc);
-    try { image=FromBitmap(bitmap); } catch(...) { DeleteObject(bitmap); throw; } DeleteObject(bitmap);
+    try { ReadRenderedBitmap(bitmap,image); } catch(...) { DeleteObject(bitmap); throw; } DeleteObject(bitmap);
 }
 AnnotationSurface RenderRecordingSurface(int width,int height,const RecordingAnnotations& snapshot,AnnotationRenderer& renderer,int offsetX,int offsetY) {
     // Recover premultiplied coverage from the shared renderer's RGB output.

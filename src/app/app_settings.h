@@ -9,6 +9,7 @@ enum class MonitorItem : std::uint32_t {
     CpuUsage = 1u << 2,
     MemoryUsage = 1u << 3,
     CpuFrequency = 1u << 5,
+    GpuUsage = 1u << 6,
 };
 
 constexpr std::uint32_t ToMask(MonitorItem item) noexcept {
@@ -20,7 +21,8 @@ constexpr std::uint32_t kAllMonitorItems =
     ToMask(MonitorItem::DownloadSpeed) |
     ToMask(MonitorItem::CpuUsage) |
     ToMask(MonitorItem::MemoryUsage) |
-    ToMask(MonitorItem::CpuFrequency);
+    ToMask(MonitorItem::CpuFrequency) |
+    ToMask(MonitorItem::GpuUsage);
 
 class AppSettings final {
 public:

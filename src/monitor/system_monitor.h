@@ -6,11 +6,13 @@
 #include <chrono>
 #include <cstdint>
 #include <vector>
+#include "monitor/gpu_monitor.h"
 
 struct SystemMetrics {
     double uploadBytesPerSecond{};
     double downloadBytesPerSecond{};
     double cpuUsagePercent{};
+    double gpuUsagePercent{-1};
     DWORD memoryUsagePercent{};
     double cpuFrequencyGhz{};
 };
@@ -23,7 +25,8 @@ public:
     SystemMonitor(const SystemMonitor&) = delete;
     SystemMonitor& operator=(const SystemMonitor&) = delete;
 
-    void Sample(bool includeCpuFrequency);
+    void Sample(bool includeCpuFrequency, bool includeGpuUsage = false);
+    void SetGpuEnabled(bool enabled) { gpuSampler_.Enable(enabled); metrics_.gpuUsagePercent = gpuSampler_.Value(); }
     [[nodiscard]] const SystemMetrics& Metrics() const noexcept { return metrics_; }
 
 private:
@@ -43,6 +46,7 @@ private:
     void SampleCpuFrequency();
 
     SystemMetrics metrics_{};
+    gpu_monitor::Sampler gpuSampler_;
     std::uint64_t previousIdleTime_{};
     std::uint64_t previousKernelTime_{};
     std::uint64_t previousUserTime_{};

@@ -1,106 +1,177 @@
-﻿param([Parameter(Mandatory=$true)][string]$Binaries)
+param([Parameter(Mandatory=$true)][string]$Binaries,[string]$Stage,[string]$Manifest,[switch]$WaitForAutomaticRetry)
 $ErrorActionPreference='Stop'
 $project=Split-Path -Parent $PSScriptRoot
 $Binaries=[IO.Path]::GetFullPath($Binaries)
 $testId=[guid]::NewGuid().ToString('N')
 $base=Join-Path $project "out/uninstall-installer-tests/$testId"
 New-Item -ItemType Directory -Path $base -Force | Out-Null
-$stage=(Get-ChildItem "$project/out/package-stage" -Directory|Sort-Object LastWriteTime -Descending|Select-Object -First 1).FullName
-$namespace="Software\PcToolUninstallTest-$testId"
-# Compile the production script with only external destinations isolated.
-# This exercises real NSIS install/upgrade/uninstall without replacing live integration.
+if(!$Stage){$Stage=(Get-ChildItem "$project/out/package-stage" -Directory|Sort-Object LastWriteTime -Descending|Select-Object -First 1).FullName}
+if(!$Manifest){$Manifest=Join-Path $project ('out/package-manifest/'+(Split-Path -Leaf $Stage))}
+$Stage=[IO.Path]::GetFullPath($Stage)
+$Manifest=[IO.Path]::GetFullPath($Manifest)
+$cleanupNamespace="PcToolTest-$testId";$namespace="Software\$cleanupNamespace"
+. "$project/packaging/cleanup-jobs.ps1"
+# All external registration, startup, shortcut and task destinations are isolated.
 $script=[IO.File]::ReadAllText("$project/packaging/PcTool.nsi")
+if($script -match 'release-shell|repair-shell|REBOOTOK|SetRebootFlag|SetErrorLevel 3010'){throw 'Installer must not restart Explorer or queue reboot deletion'}
 $script=$script.Replace('Software\PcToolInstaller',"$namespace\Installer")
 $script=$script.Replace('Software\Microsoft\Windows\CurrentVersion\Uninstall\PcTool',"$namespace\Uninstall")
-$script=$script.Replace('Software\Microsoft\Windows\CurrentVersion\App Paths\7zFM.exe',"$namespace\AppPath")
-$script=$script.Replace('Software\Microsoft\Windows\CurrentVersion\Run',"$namespace\Run")
-$script=$script.Replace('Software\Classes',"$namespace\Classes").Replace('Software\7-Zip',"$namespace\SevenZip")
 $script=$script.Replace('$SMPROGRAMS\PcTool','$INSTDIR\test-shortcuts').Replace('$DESKTOP\PcTool.lnk','$INSTDIR\test-desktop.lnk')
 $script=$script.Replace('..\Resources\PcTool.ico',"$project\Resources\PcTool.ico")
 $script=$script.Replace('MUI_PAGE_LICENSE "license.txt"',('MUI_PAGE_LICENSE "'+$project+'\packaging\license.txt"'))
-$script=$script.Replace('"manage-data.ps1"',('"'+$project+'\packaging\manage-data.ps1"'))
-$script=$script.Replace('  Call ClosePcTool','  ; Isolated test must not close the live developer application.')
+foreach($name in @('manage-data.ps1','cleanup-jobs.ps1','retry-cleanup.ps1','shell-integration.ps1')){$script=$script.Replace(('"'+$name+'"'),('"'+$project+'\packaging\'+$name+'"'))}
 [IO.File]::WriteAllText("$base/test.nsi",$script,[Text.UTF8Encoding]::new($true))
-& "$project/out/nsis/nsis-3.12/makensis.exe" /V2 "/DOUTPUT=$base/Setup.exe" "/DMANIFEST=$project/out/package-manifest" "/DSTAGE=$stage" "$base/test.nsi" *> "$base/compile.log"
+$compiler="$project/out/nsis/nsis-3.12/makensis.exe"
+if(!(Test-Path -LiteralPath $compiler)){$compiler=(Get-ChildItem "$project/out/package-tools" -Filter makensis.exe -Recurse|Select-Object -First 1).FullName}
+& $compiler /V2 "/DOUTPUT=$base/Setup.exe" "/DMANIFEST=$Manifest" "/DSTAGE=$Stage" "/DPCTOOL_CLEANUP_NAMESPACE=$cleanupNamespace" "$base/test.nsi" *> "$base/compile.log"
 if($LASTEXITCODE){throw "Isolated NSIS compilation failed: $base/compile.log"}
 $clsid='{23170F69-40C1-278A-1000-000100020000}'
-$keys=@()
-$processes=@()
-$lockedFile=$null
-function Remove-TestPending {
- $queue=[Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SYSTEM\CurrentControlSet\Control\Session Manager',$true)
- try {
-  $name='PendingFileRenameOperations';$entries=@($queue.GetValue($name,[string[]]@()))
-  if($entries.Count % 2){throw 'Unexpected pending operation list'}
-  $kept=[Collections.Generic.List[string]]::new()
-  $prefix='\??\'+[IO.Path]::GetFullPath($base)+'\'
-  for($i=0;$i -lt $entries.Count;$i+=2){if(!$entries[$i].StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase)){$kept.Add($entries[$i]);$kept.Add($entries[$i+1])}}
-  if($kept.Count){$queue.SetValue($name,$kept.ToArray(),[Microsoft.Win32.RegistryValueKind]::MultiString)}else{$queue.DeleteValue($name,$false)}
- } finally {$queue.Dispose()}
+$keys=@();$processes=@();$hosts=@();$destinations=@()
+function Check([bool]$condition,[string]$message){if(!$condition){throw $message}}
+function Read-Value($registry,$path,$name=''){
+ $key=$registry.OpenSubKey($path);if(!$key){return $null};try{return $key.GetValue($name)}finally{$key.Dispose()}
 }
-try {
+function Production-Snapshot {
+ $values=@();foreach($registry in $keys){
+  $values+=Read-Value $registry "Software\Classes\CLSID\$clsid\InprocServer32"
+  $values+=Read-Value $registry 'Software\Microsoft\Windows\CurrentVersion\Shell Extensions\Approved' $clsid
+  $values+=Read-Value $registry 'Software\PcToolInstaller' 'InstallDir'
+ }
+ return ConvertTo-Json -InputObject $values -Compress
+}
+function Queue-Snapshot {
+ $key=[Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SYSTEM\CurrentControlSet\Control\Session Manager')
+ try{return @($key.GetValue('PendingFileRenameOperations',[string[]]@())) -join "`0"}finally{$key.Dispose()}
+}
+function Install-App($destination){
+ $setup=Start-Process -FilePath "$base/Setup.exe" -ArgumentList @('/S',"/D=$destination") -WindowStyle Hidden -PassThru -Wait
+ Check ($setup.ExitCode -eq 0) "Install failed: $($setup.ExitCode)"
+ Check (Test-Path "$destination/.pctool-managed-files.json") 'Installed inventory missing'
+ foreach($dll in @('7-zip.dll','7-zip32.dll')){Check ((Get-FileHash "$destination/modules/archive/$dll").Hash -eq (Get-FileHash "$Stage/modules/archive/$dll").Hash) 'Installed extension hash mismatch'}
+ Check (!(Test-Path "$destination/.pctool-uninstalling")) 'Installation retained uninstall guard'
+}
+function Uninstall-App($destination,$label){
+ $runner=Join-Path $base "Uninstall-$label.exe"
+ if(Test-Path "$destination/Uninstall.exe"){Copy-Item -LiteralPath "$destination/Uninstall.exe" -Destination $runner -Force}
+ $elapsed=[Diagnostics.Stopwatch]::StartNew()
+ $uninstall=Start-Process -FilePath $runner -ArgumentList @('/S',"_?=$destination") -WindowStyle Hidden -PassThru -Wait
+ Check ($uninstall.ExitCode -eq 0) "Uninstall failed: $($uninstall.ExitCode)"
+ foreach($registry in $keys){Check ($null -eq (Read-Value $registry "$namespace\Uninstall" 'DisplayName')) 'Uninstall registration remains'}
+ Write-Host "Uninstall $label returned 0 in $([math]::Round($elapsed.Elapsed.TotalSeconds,2)) s"
+}
+function Start-Host($destination,$label,$arch){
+ $prefix=Join-Path $base "$label-$arch"
+ $exe=Join-Path $project "out/installer-menu-20261013/$arch/PcToolArchiveShellTests.exe"
+ $args=@(('"'+$destination+'/modules/archive"'),'--lifecycle-host',('"'+$prefix+'"'))
+ if($arch -eq 'x86'){$args+='7-zip32.dll'}
+ $process=Start-Process -FilePath $exe -ArgumentList $args -WindowStyle Hidden -PassThru
+ $script:processes+=,$process
+ for($i=0;$i -lt 100 -and !(Test-Path "$prefix.ready") -and !$process.HasExited;$i++){Start-Sleep -Milliseconds 100}
+ Check (Test-Path "$prefix.ready") "Lifecycle host did not become ready: $prefix"
+ $hostState=[pscustomobject]@{Process=$process;Prefix=$prefix}
+ $script:hosts+=,$hostState;return $hostState
+}
+function Check-Host($hostState){
+ Check (!$hostState.Process.HasExited) 'Uninstaller terminated an unrelated DLL host'
+ [IO.File]::WriteAllText(($hostState.Prefix+'.check'),'check')
+ for($i=0;$i -lt 100 -and !(Test-Path ($hostState.Prefix+'.checked')) -and !$hostState.Process.HasExited;$i++){Start-Sleep -Milliseconds 100}
+ Check (Test-Path ($hostState.Prefix+'.checked')) "Cached COM object still active: $($hostState.Prefix)"
+}
+function Release-Host($hostState){
+ [IO.File]::WriteAllText(($hostState.Prefix+'.release'),'release')
+ Check ($hostState.Process.WaitForExit(10000)) 'Host did not release DLL'
+ Check ($hostState.Process.ExitCode -eq 0) "Lifecycle host failed: $($hostState.Process.ExitCode)"
+}
+function Wait-Cleanup($destination,[bool]$automatic){
+ $store=Get-CleanupStore $cleanupNamespace
+ $watch=[Diagnostics.Stopwatch]::StartNew()
+ for($i=0;$i -lt 360;$i++){
+  $jobs=@();if(Test-Path $store){$jobs=@(Get-ChildItem -LiteralPath $store -Filter job.json -Recurse|ForEach-Object {Get-Content -LiteralPath $_.FullName -Raw|ConvertFrom-Json}|Where-Object {$_.Root -eq $destination})}
+  if(!$jobs.Count){return $watch.Elapsed.TotalSeconds}
+  if(!$automatic -and $i % 10 -eq 0){$scheduler=Open-CleanupScheduler $cleanupNamespace;foreach($job in $jobs){try{[void]$scheduler.Folder.GetTask($job.TaskName).Run($null)}catch{}}}
+  Start-Sleep -Seconds 1
+ }
+ throw 'Scheduled cleanup did not finish within six minutes'
+}
+function Wait-FirstDeferredAttempt($destination){
+ # Ensure the immediate SYSTEM attempt has observed the occupied DLL. Only
+ # then release it, so completion must come from the real five-minute trigger.
+ $store=Get-CleanupStore $cleanupNamespace
+ for($i=0;$i -lt 40;$i++){
+  $jobs=@(Get-ChildItem -LiteralPath $store -Filter job.json -Recurse|ForEach-Object {Get-Content -LiteralPath $_.FullName -Raw|ConvertFrom-Json}|Where-Object {$_.Root -eq $destination})
+  if($jobs.Count -eq 1){
+   $scheduler=Open-CleanupScheduler $cleanupNamespace
+   $task=$scheduler.Folder.GetTask($jobs[0].TaskName)
+   if($task.State -ne 4 -and $task.LastTaskResult -eq 2){
+    Check ($task.Xml -match '<Interval>PT5M</Interval>' -and $task.Xml -match '<LogonTrigger') 'Retry triggers missing'
+    Write-Host 'Immediate SYSTEM attempt returned pending; waiting for the automatic five-minute retry after release.'
+    return
+   }
+  }
+  Start-Sleep -Seconds 1
+ }
+ throw 'Immediate SYSTEM task did not observe the occupied DLL'
+}
+try{
+ foreach($view in @([Microsoft.Win32.RegistryView]::Registry64,[Microsoft.Win32.RegistryView]::Registry32)){$keys+=,[Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine,$view)}
+ $before=Production-Snapshot;$queueBefore=Queue-Snapshot
  foreach($previous in @($false,$true)){
   $label=if($previous){'previous-7zip'}else{'no-previous'}
-  $destination=[IO.Path]::GetFullPath((Join-Path $base $label))
-  foreach($view in @([Microsoft.Win32.RegistryView]::Registry64,[Microsoft.Win32.RegistryView]::Registry32)){
-   $registry=[Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine,$view)
-   $keys+=,$registry
-   if($previous){
-    $key=$registry.CreateSubKey("$namespace\Classes\CLSID\$clsid\InprocServer32")
-    $key.SetValue('','C:\Independent7Zip\7-zip.dll');$key.Dispose()
-   }
-  }
-  foreach($iteration in 1,2){
-   $setup=Start-Process -FilePath "$base/Setup.exe" -ArgumentList @('/S',"/D=$destination") -WindowStyle Hidden -PassThru -Wait
-   if($setup.ExitCode -ne 0){throw "Install/upgrade failed: $($setup.ExitCode)"}
-   if(!(Test-Path "$destination/.pctool-managed-files.json")){throw 'Installed inventory missing'}
-   if((Test-Path "$destination/docs") -or (Test-Path "$destination/tests")){throw 'Development directories installed'}
-  }
+  $destination=[IO.Path]::GetFullPath((Join-Path $base ($label+' app')));$destinations+=,$destination
+  foreach($registry in $keys){if($previous){$key=$registry.CreateSubKey("$namespace\Classes\CLSID\$clsid\InprocServer32");$key.SetValue('','C:\Independent7Zip\7-zip.dll');$key.Dispose()}}
+  Install-App $destination
+  & "$Binaries/PcToolArchiveShellTests.exe" "$destination/modules/archive"
+  Check ($LASTEXITCODE -eq 0) 'Installed menu generation failed'
+  $held64=Start-Host $destination "$label-upgrade" 'x64'
+  Install-App $destination
+  Check (@(Get-ChildItem "$destination/modules/archive" -Filter '*.old').Count -gt 0) 'Occupied upgrade DLL was not retired'
+  Release-Host $held64
+  [void](Wait-Cleanup $destination $false)
   [IO.File]::WriteAllText("$destination/keep.txt",'unrelated file')
-  # A stubborn task holds a real hive, exercising forced stop from the actual uninstaller.
-  Copy-Item "$Binaries/PcToolUninstallFixture.exe" "$destination/PcTool.exe" -Force
-  $task=Start-Process -FilePath "$destination/PcTool.exe" -ArgumentList @(('"'+$destination+'"'),'stubborn') -WindowStyle Hidden -PassThru
-  $processes+=,$task
-  for($i=0;$i -lt 60 -and !(Test-Path "$destination/$($task.Id).ready");$i++){Start-Sleep -Milliseconds 50}
-  if(!(Test-Path "$destination/$($task.Id).ready")){throw 'Task fixture failed'}
-  $timer=[Diagnostics.Stopwatch]::StartNew()
-  # Run a copy outside the installation with _?= to wait for the actual cleanup
-  # process. NSIS's normal self-copy launcher can return before its child finishes.
-  $uninstallRunner=Join-Path $base ("Uninstall-$label.exe")
-  Copy-Item -LiteralPath "$destination/Uninstall.exe" -Destination $uninstallRunner
-  $lockedFile=[IO.File]::Open("$destination/Data/external-lock.tmp",'Create','ReadWrite','None')
-  $uninstall=Start-Process -FilePath $uninstallRunner -ArgumentList @('/S',"_?=$destination") -WindowStyle Hidden -PassThru -Wait
-  if($uninstall.ExitCode -ne 3010){throw "Locked uninstall returned $($uninstall.ExitCode)"}
-  foreach($retryFile in @('Uninstall.exe','PcToolUninstallHelper.exe','manage-data.ps1','.pctool-managed-files.json')){
-   if(!(Test-Path (Join-Path $destination $retryFile))){throw "Retry file removed on incomplete cleanup: $retryFile"}
-  }
-  $lockedFile.Dispose();$lockedFile=$null;Remove-TestPending
-  $uninstall=Start-Process -FilePath $uninstallRunner -ArgumentList @('/S',"_?=$destination") -WindowStyle Hidden -PassThru -Wait
-  if($uninstall.ExitCode -ne 0){throw "Uninstall returned $($uninstall.ExitCode)"}
-  for($i=0;$i -lt 100 -and (Test-Path "$destination/Uninstall.exe");$i++){Start-Sleep -Milliseconds 100}
-  if(!$task.WaitForExit(1000) -or $task.ExitCode -ne 1602){throw 'Uninstaller did not force-stop the task'}
-  foreach($path in @('PcTool.exe','PcToolUninstallHelper.exe','Uninstall.exe','Data','Cache','modules','ocr_models','ocr_licenses','licenses','.pctool-uninstalling','.pctool-managed-files.json','test-shortcuts','test-desktop.lnk')){
-   if(Test-Path (Join-Path $destination $path)){throw "Uninstall residual: $path"}
-  }
-  if(!(Test-Path "$destination/keep.txt")){throw 'Unrelated file removed'}
+  $host64=Start-Host $destination "$label-uninstall" 'x64'
+  $host32=Start-Host $destination "$label-uninstall" 'x86'
+  Uninstall-App $destination $label
+  Check-Host $host64;Check-Host $host32
+  Check (Test-Path "$destination/.pctool-uninstalling") 'Uninstall guard removed while DLLs remain'
   foreach($registry in $keys){
-   $key=$registry.OpenSubKey("$namespace\Classes\CLSID\$clsid\InprocServer32")
-   $actual=if($key){$value=$key.GetValue('');$key.Dispose();$value}else{''}
-   if($previous -and $actual -ne 'C:\Independent7Zip\7-zip.dll'){throw 'Previous registration not restored'}
-   if(!$previous -and $actual){throw 'Extension registration remains'}
-   foreach($kind in @('Uninstall','Installer')){
-    $key=$registry.OpenSubKey("$namespace\$kind")
-    if($key){$key.Dispose();throw "Registration remains: $kind"}
-   }
-   $registry.DeleteSubKeyTree($namespace,$false)
+   $expected=if($previous){'C:\Independent7Zip\7-zip.dll'}else{$null}
+   Check ((Read-Value $registry "$namespace\Classes\CLSID\$clsid\InprocServer32") -eq $expected) 'Previous provider not restored'
   }
-  "PASS isolated NSIS install, upgrade, forced uninstall, files and 32/64-bit registration restoration ($label), $([math]::Round($timer.Elapsed.TotalSeconds,2))s"
-  foreach($key in $keys){$key.Dispose()};$keys=@()
+  if(!$previous){
+   # Reinstall before the old mapping is released; old cleanup must not remove new files.
+   Install-App $destination
+   $hash=(Get-FileHash "$destination/modules/archive/7-zip.dll").Hash
+   Release-Host $host64;Release-Host $host32
+   [void](Wait-Cleanup $destination $false)
+   Check ((Get-FileHash "$destination/modules/archive/7-zip.dll").Hash -eq $hash) 'Old cleanup deleted reinstalled DLL'
+   Check (Test-Path "$destination/PcTool.exe") 'Old cleanup deleted reinstalled application'
+   $host64=Start-Host $destination "$label-second" 'x64'
+   $host32=Start-Host $destination "$label-second" 'x86'
+   Uninstall-App $destination $label
+   Check-Host $host64;Check-Host $host32
+  }
+  # Repeat with only instance/guard/occupied DLLs left, using the copied uninstaller.
+  Uninstall-App $destination $label
+  if($previous -and $WaitForAutomaticRetry){Wait-FirstDeferredAttempt $destination}
+  Release-Host $host64;Release-Host $host32
+  $seconds=Wait-Cleanup $destination ($previous -and $WaitForAutomaticRetry)
+  foreach($path in @('PcTool.exe','Uninstall.exe','modules','Data','Cache','.pctool-uninstalling','.pctool-install-instance.json','.pctool-managed-files.json','test-shortcuts','test-desktop.lnk')){Check (!(Test-Path (Join-Path $destination $path))) "Residual after cleanup: $path"}
+  Check (Test-Path "$destination/keep.txt") 'Unrelated file removed'
+  Uninstall-App $destination $label
+  Check (!(Test-Path "$destination/.pctool-uninstalling")) 'Repeated uninstall recreated guard'
+  foreach($registry in $keys){$registry.DeleteSubKeyTree($namespace,$false)}
+  "PASS isolated install, mapped-DLL upgrade, cached x64/x86 COM uninstall, repeat uninstall, scheduled cleanup and unrelated file preservation ($label); cleanup wait $([math]::Round($seconds,2)) s"
  }
+ Check ((Production-Snapshot) -ceq $before) 'Production integration changed'
+ Check ((Queue-Snapshot) -ceq $queueBefore) 'Installer wrote a reboot-delete operation'
+ 'PASS production registry isolation and no new reboot-delete operations'
  "Evidence: $base"
-} finally {
- if($lockedFile){$lockedFile.Dispose()}
- Remove-TestPending
+}finally{
+ foreach($hostState in $hosts){if(!$hostState.Process.HasExited){[IO.File]::WriteAllText(($hostState.Prefix+'.release'),'release');[void]$hostState.Process.WaitForExit(5000)}}
  foreach($process in $processes){if(!$process.HasExited){$process.Kill();$process.WaitForExit()};$process.Dispose()}
+ foreach($destination in $destinations){Stop-CleanupJobs $destination $cleanupNamespace}
  foreach($registry in $keys){$registry.DeleteSubKeyTree($namespace,$false);$registry.Dispose()}
+ $store=Get-CleanupStore $cleanupNamespace
+ if(Test-Path $store){Assert-CleanupSecurity $store;if(!(Get-ChildItem -LiteralPath $store -Force)){[IO.Directory]::Delete($store,$false);[IO.Directory]::Delete((Split-Path -Parent $store),$false)}}
+ try{$service=New-Object -ComObject Schedule.Service;$service.Connect();$service.GetFolder('\').DeleteFolder($cleanupNamespace,0)}catch{}
 }

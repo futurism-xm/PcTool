@@ -217,7 +217,8 @@ int wmain(int argc, wchar_t** argv) {
             return 0;
         }
         if (root == root.root_path() || attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_REPARSE_POINT) ||
-            (!fs::exists(root / L"PcTool.exe") && !fs::exists(root / L".pctool-managed-files.json"))) return ERROR_BAD_PATHNAME;
+            (!fs::exists(root / L"PcTool.exe") && !fs::exists(root / L".pctool-managed-files.json") &&
+             !fs::is_regular_file(root / L".pctool-install-instance.json"))) return ERROR_BAD_PATHNAME;
         if (Equal(argv[1], L"stop")) return static_cast<int>(Stop(root));
         if (Equal(argv[1], L"release-shell") && fs::exists(root / L".pctool-uninstalling")) return static_cast<int>(ReleaseShell(root));
         return ERROR_INVALID_PARAMETER;

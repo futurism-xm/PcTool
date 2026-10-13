@@ -1,4 +1,5 @@
 #include "translation/translation_controller.h"
+#include "translation/clipboard_source.h"
 #include "translation/translation_capture.h"
 #include "translation/translation_view.h"
 #include "shared/ui/capture_ui.h"
@@ -120,6 +121,46 @@ struct CountingProvider:translation::TranslationProvider{
     translation::ProviderInfo Info()const override{return {L"selection-test",L"测试翻译源",true};}
     void Translate(std::wstring text,std::shared_ptr<capture::Cancellation>,Completion done)override{++calls;last=std::move(text);done({L"测试结果",{}});}
 };
+void HelperSelectionCase(){
+    wchar_t exe[32768]{};GetModuleFileNameW(nullptr,exe,32768);
+    std::wstring command=L"\""+std::wstring(exe)+L"\" --copy-target --with-helper";
+    STARTUPINFOW startup{sizeof(startup)};PROCESS_INFORMATION process{};
+    Require(CreateProcessW(exe,command.data(),nullptr,nullptr,FALSE,0,nullptr,nullptr,&startup,&process)!=FALSE,"start multiprocess copy source");CloseHandle(process.hThread);
+    struct Cleanup{HANDLE process;HWND window{};~Cleanup(){if(window)PostMessageW(window,WM_CLOSE,0,0);WaitForSingleObject(process,2000);CloseHandle(process);}} cleanup{process.hProcess};
+    HWND target{};Require(Until([&]{target=FindWindowW(L"PcTool.TranslationCopyTarget",nullptr);return target && GetPropW(target,L"HelperCopyWindow");},5000),"helper source not ready");cleanup.window=target;
+    HWND helper=static_cast<HWND>(GetPropW(target,L"HelperCopyWindow"));DWORD helperPid{};GetWindowThreadProcessId(helper,&helperPid);
+    translation::ClipboardSource identity;Require(identity.Begin(process.dwProcessId),"bind source identity");
+    Require(identity.Accepts(process.dwProcessId)&&identity.Accepts(helperPid),"same process or descendant rejected");
+    Require(!identity.Accepts(GetCurrentProcessId())&&!identity.Accepts(0),"ancestor or unknown writer accepted");
+    translation::TranslationController controller;auto provider=std::make_shared<CountingProvider>();controller.SetProviders({provider});
+    HWND host=Host(L"PcTool.HelperSelectionTest");controller.Configure(host,true,[]{return true;},false);
+    for(int trial=0;trial<24;++trial){
+        SendMessageW(helper,WM_APP+13,trial>=12,0);
+        Require(capture::CopyText(host,L"old clipboard must not be translated"),"seed stale clipboard");
+        ActivateSource(target);SendMessageW(target,WM_APP+1,0,0);Pump(40);
+        int before=provider->calls;controller.HandleHotkey(translation::SelectionHotkey);
+        HWND popup=OwnWindow(L"PcTool.Translation");Require(popup&&IsWindowVisible(popup),"helper popup not immediate");
+        Require(Until([&]{return provider->calls==before+1;}),"child clipboard not submitted");
+        if(trial>=12)Require(GetClipboardOwner()==nullptr,"fixture must have no clipboard owner");
+        Require(provider->last==L"中文取词 English 123\r\nsecond line","helper text incomplete");
+        Require(Status(popup).empty(),"helper text did not clear warning");Pump(100);Require(provider->calls==before+1,"duplicate helper submission");
+    }
+    HWND edit=GetDlgItem(target,101),popup=OwnWindow(L"PcTool.Translation");
+    SendMessageW(edit,WM_APP+3,1,0);ActivateSource(target);SendMessageW(target,WM_APP+1,0,0);
+    controller.HandleHotkey(translation::SelectionHotkey);
+    Require(Until([&]{return GetClipboardOwner()==popup;}),"wait for clipboard clear");
+    capture::CopyText(host,L"unrelated writer");Pump(350);
+    Require(Status(popup).find(L"其他程序")!=std::wstring::npos&&capture::WindowText(Child(popup,1101)).empty(),"unrelated clipboard accepted");
+    ActivateSource(target);SendMessageW(target,WM_APP+1,0,0);controller.HandleHotkey(translation::SelectionHotkey);
+    Require(Until([&]{return GetClipboardOwner()==popup;}),"wait for delayed helper dispatch");
+    SetWindowTextW(Child(popup,1101),L"user input");Pump(350);
+    Require(capture::WindowText(Child(popup,1101))==L"user input","late helper overwrote edit");
+    controller.Shutdown();DestroyWindow(host);PostMessageW(target,WM_CLOSE,0,0);
+    Require(Until([&]{return WaitForSingleObject(process.hProcess,0)==WAIT_OBJECT_0;}),"source did not exit");
+    Require(!identity.Accepts(process.dwProcessId)&&!identity.Accepts(helperPid),"closed source accepted");
+    cleanup.window=nullptr;identity.Reset();Require(!identity.Accepts(helperPid),"cancelled request accepted");
+    std::cout<<"PASS 12 multiprocess and 12 ownerless selections, stale clipboard ignored, immediate popup, complete text, exactly one submission, foreign writer rejection, late ownerless edit protection and source exit\n";
+}
 void NotepadPlusCase(const std::filesystem::path& output,const std::filesystem::path& executable){
     Require(std::filesystem::exists(executable),"Notepad++ executable unavailable");
     std::filesystem::create_directories(output/L"npp-config");
@@ -134,12 +175,15 @@ void NotepadPlusCase(const std::filesystem::path& output,const std::filesystem::
     Require(Until([&]{EnumWindows([](HWND w,LPARAM l)->BOOL{auto& f=*reinterpret_cast<Find*>(l);DWORD pid{};GetWindowThreadProcessId(w,&pid);wchar_t cls[80]{};GetClassNameW(w,cls,80);if(pid==f.pid&&wcscmp(cls,L"Notepad++")==0&&IsWindowVisible(w)){f.window=w;return FALSE;}return TRUE;},reinterpret_cast<LPARAM>(&found));return found.window!=nullptr;},5000),"isolated Notepad++ window missing");cleanup.window=found.window;
     translation::TranslationController controller;auto provider=std::make_shared<CountingProvider>();controller.SetProviders({provider});
     HWND host=Host(L"PcTool.NppSelectionTest");service=&controller;controller.Configure(host,true,[]{return true;},false);
+    const bool isolatedKeys=GetEnvironmentVariableW(L"PCTOOL_TEST_ISOLATED_KEYS",nullptr,0)!=0;
+    auto initialBindings=hotkeys::Defaults;
+    if(isolatedKeys){initialBindings[2]={MOD_ALT,VK_F20};initialBindings[3]={MOD_ALT,VK_F21};initialBindings[4]={MOD_ALT,VK_F22};controller.Configure(host,true,[]{return true;},false,initialBindings);}
     auto key=[](WORD code,bool up=false){INPUT i{};i.type=INPUT_KEYBOARD;i.ki.wVk=code;i.ki.dwFlags=up?KEYEVENTF_KEYUP:0;Require(SendInput(1,&i,sizeof(i))==1,"selection key injection");};
     HWND scintilla{};EnumChildWindows(found.window,[](HWND w,LPARAM p)->BOOL{wchar_t cls[80]{};GetClassNameW(w,cls,80);if(wcscmp(cls,L"Scintilla")==0&&IsWindowVisible(w)){*reinterpret_cast<HWND*>(p)=w;return FALSE;}return TRUE;},reinterpret_cast<LPARAM>(&scintilla));Require(scintilla!=nullptr,"Notepad++ editor missing");
     struct ReleaseKeys{~ReleaseKeys(){INPUT i[3]{};const WORD codes[]{'E',VK_MENU,VK_CONTROL};for(int j=0;j<3;++j){i[j].type=INPUT_KEYBOARD;i[j].ki.wVk=codes[j];i[j].ki.dwFlags=KEYEVENTF_KEYUP;}SendInput(3,i,sizeof(INPUT));}} release;
     for(int trial=0;trial<15;++trial){
-        const WORD trigger=trial<12?'E':'R';
-        if(trial==12){auto bindings=hotkeys::Defaults;bindings[4]={MOD_ALT,'R'};controller.Configure(host,true,[]{return true;},false,bindings);}
+        const WORD trigger=trial<12?(isolatedKeys?VK_F22:'E'):(isolatedKeys?VK_F23:'R');
+        if(trial==12){auto bindings=initialBindings;bindings[4]={MOD_ALT,trigger};controller.Configure(host,true,[]{return true;},false,bindings);}
         SetWindowPos(found.window,HWND_TOPMOST,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_SHOWWINDOW);RECT r{};GetWindowRect(scintilla,&r);SetCursorPos(r.left+100,r.top+30);INPUT click[2]{};for(auto& i:click)i.type=INPUT_MOUSE;click[0].mi.dwFlags=MOUSEEVENTF_LEFTDOWN;click[1].mi.dwFlags=MOUSEEVENTF_LEFTUP;SendInput(2,click,sizeof(INPUT));Pump(40);SetWindowPos(found.window,HWND_NOTOPMOST,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);
         key(VK_CONTROL);key('A');key('A',true);key(VK_CONTROL,true);Pump(60);
         Snapshot(found.window,output/L"npp-source.png");std::cout<<"Npp text bytes="<<SendMessageW(scintilla,2183,0,0)<<" selected="<<SendMessageW(scintilla,2143,0,0)<<","<<SendMessageW(scintilla,2145,0,0)<<"\n";
@@ -155,7 +199,7 @@ void NotepadPlusCase(const std::filesystem::path& output,const std::filesystem::
         Require(Status(popup).empty()&&IsWindowVisible(popup),"Notepad++ successful copy retained warning or hidden window");
     }
     for(int trial=0;trial<10;++trial){
-        const int before=provider->calls;key(VK_MENU);key('R');key('R',true);key(VK_MENU,true);
+        const WORD trigger=isolatedKeys?VK_F23:'R';const int before=provider->calls;key(VK_MENU);key(trigger);key(trigger,true);key(VK_MENU,true);
         Require(Until([&]{return provider->calls>before;}),"Notepad++ repeat from translation popup failed");
         Require(provider->calls==before+1&&provider->last==text,"Notepad++ repeat reused wrong source or submitted twice");
     }
@@ -170,7 +214,7 @@ void NotepadPlusCase(const std::filesystem::path& output,const std::filesystem::
     controller.Invoke(translation::Entry::Selection,true,{found.window,process.dwProcessId+1});
     Require(IsWindowVisible(OwnWindow(L"PcTool.Translation"))&&!Status(OwnWindow(L"PcTool.Translation")).empty(),"stale menu source missing failure feedback");
     controller.Shutdown();service=nullptr;DestroyWindow(host);
-    std::cout<<"PASS Notepad++ 12 Alt+E, 3 custom Alt+R, 10 shortcut repeats, 10 disabled-hotkey menu selections and stale source rejection\n";
+    std::cout<<"PASS Notepad++ 12 selections, 3 changed bindings, 10 shortcut repeats, 10 disabled-hotkey menu selections and stale source rejection; isolatedKeys="<<isolatedKeys<<"\n";
 }
 void Core(){
     auto provider=std::make_shared<DeferredProvider>();
@@ -209,10 +253,47 @@ void Core(){
 int wmain(int argc,wchar_t** argv){
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);
     INITCOMMONCONTROLSEX controls{sizeof(controls),ICC_STANDARD_CLASSES};InitCommonControlsEx(&controls);
+    if(argc>2&&std::wstring(argv[1])==L"--clipboard-helper"){
+        HWND parent=reinterpret_cast<HWND>(_wcstoui64(argv[2],nullptr,10));
+        WNDCLASSW wc{};wc.hInstance=GetModuleHandleW(nullptr);wc.lpszClassName=L"PcTool.TestClipboardHelper";
+        wc.lpfnWndProc=[](HWND w,UINT m,WPARAM wp,LPARAM lp)->LRESULT{
+            if(m==WM_APP+13){SetPropW(w,L"OwnerlessCopyFixture",reinterpret_cast<HANDLE>(wp));return 0;}
+            if(m==WM_APP+12){
+                constexpr wchar_t text[]=L"中文取词 English 123\r\nsecond line";
+                if(!GetPropW(w,L"OwnerlessCopyFixture")){capture::CopyText(w,text);return 0;}
+                // Destroy a short-lived owner while the clipboard is locked:
+                // consumers see new rendered text with no owner, as in the report.
+                HWND temporary=CreateWindowW(L"STATIC",L"",0,0,0,0,0,HWND_MESSAGE,nullptr,GetModuleHandleW(nullptr),nullptr);
+                if(OpenClipboard(temporary)){
+                    EmptyClipboard();HGLOBAL data=GlobalAlloc(GMEM_MOVEABLE,sizeof(text));
+                    if(data){void* bytes=GlobalLock(data);if(bytes){memcpy(bytes,text,sizeof(text));GlobalUnlock(data);if(!SetClipboardData(CF_UNICODETEXT,data))GlobalFree(data);}else GlobalFree(data);}
+                    DestroyWindow(temporary);CloseClipboard();
+                }else DestroyWindow(temporary);
+                return 0;
+            }
+            if(m==WM_CLOSE){DestroyWindow(w);return 0;}return DefWindowProcW(w,m,wp,lp);
+        };RegisterClassW(&wc);
+        HWND helper=CreateWindowW(wc.lpszClassName,L"",0,0,0,0,0,HWND_MESSAGE,nullptr,wc.hInstance,nullptr);
+        SetPropW(parent,L"HelperCopyWindow",helper);
+        while(IsWindow(helper)&&IsWindow(parent))Pump(20);if(IsWindow(helper))DestroyWindow(helper);CoUninitialize();return 0;
+    }
     if(argc>1&&std::wstring(argv[1])==L"--copy-target"){
         HWND host=Host(L"PcTool.TranslationCopyTarget");HWND edit=CreateWindowExW(0,L"EDIT",L"中文取词 English 123\r\nsecond line",WS_CHILD|WS_VISIBLE|ES_MULTILINE,20,30,580,180,host,reinterpret_cast<HMENU>(101),GetModuleHandleW(nullptr),nullptr);
+        HANDLE helperProcess{};
+        if(argc>2&&std::wstring(argv[2])==L"--with-helper"){
+            wchar_t exe[32768]{};GetModuleFileNameW(nullptr,exe,32768);
+            auto command=L"\""+std::wstring(exe)+L"\" --clipboard-helper "+std::to_wstring(reinterpret_cast<UINT_PTR>(host));
+            STARTUPINFOW startup{sizeof(startup)};PROCESS_INFORMATION process{};
+            if(!CreateProcessW(exe,command.data(),nullptr,nullptr,FALSE,CREATE_NO_WINDOW,nullptr,nullptr,&startup,&process))return 2;
+            CloseHandle(process.hThread);helperProcess=process.hProcess;
+        }
         SetForegroundWindow(host);SetFocus(edit);SendMessageW(edit,EM_SETSEL,0,-1);
         SetWindowSubclass(edit,[](HWND w,UINT m,WPARAM wp,LPARAM lp,UINT_PTR,DWORD_PTR)->LRESULT{
+            HWND helper=static_cast<HWND>(GetPropW(GetParent(w),L"HelperCopyWindow"));
+            if(helper&&((m==WM_COPY)||(m==WM_KEYDOWN&&wp=='C'&&(GetKeyState(VK_CONTROL)&0x8000)))){
+                if(m!=WM_COPY&&GetPropW(w,L"DelayedCopyFixture"))SetTimer(w,903,180,nullptr);
+                else PostMessageW(helper,WM_APP+12,0,0);return 0;
+            }
             if(m==WM_APP+4){if(OpenClipboard(w))SetTimer(w,904,150,nullptr);return 0;}
             if(m==WM_TIMER&&wp==904){KillTimer(w,904);CloseClipboard();return 0;}
             if(m==WM_APP+3){SetPropW(w,L"DelayedCopyFixture",reinterpret_cast<HANDLE>(wp));return 0;}
@@ -222,9 +303,10 @@ int wmain(int argc,wchar_t** argv){
             if(m==WM_KEYDOWN&&wp=='C'&&(GetKeyState(VK_CONTROL)&0x8000)&&GetPropW(w,L"CopyImageFixture")){capture::CopyImage(w,capture::Image(2,2));return 0;}
             return DefSubclassProc(w,m,wp,lp);
         },1,0);
-        while(IsWindow(host))Pump(20);CoUninitialize();return 0;
+        while(IsWindow(host))Pump(20);if(helperProcess){WaitForSingleObject(helperProcess,2000);CloseHandle(helperProcess);}CoUninitialize();return 0;
     }
     try{
+        if(argc>1&&std::wstring(argv[1])==L"selection-helpers"){HelperSelectionCase();CoUninitialize();return 0;}
         if(argc>3&&std::wstring(argv[1])==L"npp"){
             NotepadPlusCase(argv[2],argv[3]);CoUninitialize();return 0;
         }

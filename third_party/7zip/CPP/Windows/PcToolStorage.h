@@ -17,17 +17,33 @@ inline std::wstring ModuleDirectory() {
   std::wstring result(path);return result.substr(0,result.find_last_of(L"\\/"));
 }
 inline std::wstring Root() {
+  // Explorer can keep this module and its COM objects alive after uninstall.
+  // Once identified, retain the installation identity even when its files are
+  // gone; losing the identity must not turn this into a standalone 7-Zip DLL.
+  struct Cache {
+    CRITICAL_SECTION lock;std::wstring path;
+    Cache(){InitializeCriticalSection(&lock);}
+    ~Cache(){DeleteCriticalSection(&lock);}
+  };
+  static Cache cache;
+  struct Guard {CRITICAL_SECTION* lock;Guard(CRITICAL_SECTION* value):lock(value){EnterCriticalSection(lock);}~Guard(){LeaveCriticalSection(lock);}} guard(&cache.lock);
+  if(!cache.path.empty())return cache.path;
   std::wstring path=ModuleDirectory();
   for(int i=0;i<4&&!path.empty();++i){
     if(GetFileAttributesW((path+L"\\PcTool.exe").c_str())!=INVALID_FILE_ATTRIBUTES ||
-       GetFileAttributesW((path+L"\\.pctool-uninstalling").c_str())!=INVALID_FILE_ATTRIBUTES)return path;
+       GetFileAttributesW((path+L"\\.pctool-uninstalling").c_str())!=INVALID_FILE_ATTRIBUTES){cache.path=path;return path;}
     size_t slash=path.find_last_of(L"\\/");if(slash==std::wstring::npos)break;path.resize(slash);
   }return L"";
 }
 inline bool Mkdir(const std::wstring& p){DWORD a=GetFileAttributesW(p.c_str());if(a!=INVALID_FILE_ATTRIBUTES&&(a&FILE_ATTRIBUTE_REPARSE_POINT))return false;return CreateDirectoryW(p.c_str(),0)||GetLastError()==ERROR_ALREADY_EXISTS;}
 inline bool Uninstalling() {
   const std::wstring root=Root();
-  return !root.empty() && GetFileAttributesW((root+L"\\.pctool-uninstalling").c_str())!=INVALID_FILE_ATTRIBUTES;
+  if(root.empty())return false;
+  if(GetFileAttributesW((root+L"\\.pctool-uninstalling").c_str())!=INVALID_FILE_ATTRIBUTES)return true;
+  const DWORD executable=GetFileAttributesW((root+L"\\PcTool.exe").c_str());
+  // Fail closed after removal, including an accidentally deleted marker. A
+  // completed reinstall in the same directory can enable the module again.
+  return executable==INVALID_FILE_ATTRIBUTES||(executable&FILE_ATTRIBUTE_DIRECTORY)!=0;
 }
 inline std::wstring LegacyData(const std::wstring& root) {
   HANDLE token=0;if(!OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY,&token))return L"";

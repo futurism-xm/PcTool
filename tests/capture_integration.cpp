@@ -4,6 +4,7 @@
 #include "long_capture/scroll_annotation_mapping.h"
 #include <dwmapi.h>
 #include "long_capture/long_capture_session.h"
+#include "long_capture/scroll_trace.h"
 #include "shared/async/cancellation.h"
 #include "capture/image_editor.h"
 #include "ocr/ocr_window.h"
@@ -35,12 +36,15 @@
 #include <chrono>
 #include <future>
 #include <fstream>
+#include <mutex>
 
 using namespace capture;
 static void GifTest(RECT region,const std::wstring& prefix);
 void RunScreenshotInteractionTests(const std::wstring& prefix);
 void RunWindowSnapTests();
 void CompareOcr(const std::wstring& prefix);
+void RunScrollSessionPerformance(const std::wstring& prefix,int samples);
+void RunScrollInputDesktopRegression();
 static int fixtureClicks=0;
 static bool scrollFixture=false;
 static int scrollFixtureWheelUnits=0;
@@ -584,7 +588,40 @@ static void RecordingExitTest(RECT region) {
     SelectObject(dc,old); DeleteDC(dc); ReleaseDC(nullptr,desktop);
     auto image=FromBitmap(bitmap); DeleteObject(bitmap); SavePng(image,path); return image;
 }
+struct ScrollDispatchAssertions {
+    std::mutex mutex;std::vector<scroll_trace::Event> events;
+    inline static ScrollDispatchAssertions* current{};
+    static void Record(const scroll_trace::Event& event) noexcept {
+        try{std::lock_guard<std::mutex> lock(current->mutex);current->events.push_back(event);}catch(...){std::terminate();}
+    }
+    ScrollDispatchAssertions(){current=this;scroll_trace::SetCallback(Record);}
+    ~ScrollDispatchAssertions(){scroll_trace::SetCallback(nullptr);current=nullptr;}
+    void Verify(){
+        using scroll_trace::Stage;std::lock_guard<std::mutex> lock(mutex);
+        bool ready=false,settled=true,matched=false;scroll_trace::Event last{};
+        const double ticks=double(scroll_trace::Frequency())/1000;
+        for(const auto& event:events){
+            if(event.stage==Stage::BaselineReady){ready=true;settled=true;matched=false;last={};}
+            if((event.stage==Stage::Completed||event.stage==Stage::Cancelled)&&event.actionId==last.actionId){
+                settled=true;const auto result=StitchResult(event.result);
+                matched=event.stage==Stage::Completed&&(result==StitchResult::Appended||result==StitchResult::Prepended||result==StitchResult::Revisited);
+            }
+            if(event.stage!=Stage::Dispatch)continue;
+            if(!ready)throw std::runtime_error("Wheel dispatched before live baseline");
+            const double interval=last.qpc?double(event.qpc-last.qpc)/ticks:1000;
+            if(event.supplement){
+                if(settled||event.actionId!=last.actionId||interval<345)throw std::runtime_error("Whole-notch supplement violated action/pacing guard");
+            }else{
+                if(!settled)throw std::runtime_error("New scroll overlapped an unsettled action");
+                if(interval<345&&!matched)throw std::runtime_error("Fast scroll was not authorized by successful prior matching");
+                settled=false;matched=false;
+            }
+            last=event;
+        }
+    }
+};
 static void BidirectionalScrollTest(HWND fixture,const std::wstring& prefix,bool wholeOnly=false){
+    ScrollDispatchAssertions dispatchAssertions;
     bidirectionalFixture=true;partialFixture=false;scrollFixture=false;
     WNDCLASSW wc{};wc.hInstance=GetModuleHandleW(nullptr);wc.lpfnWndProc=NestedScrollProc;wc.hCursor=LoadCursorW(nullptr,IDC_ARROW);wc.lpszClassName=L"PcTool.NestedScrollFixture";RegisterClassW(&wc);
     SetWindowLongPtrW(fixture,GWL_STYLE,WS_POPUP|WS_VISIBLE|WS_CLIPCHILDREN);
@@ -698,7 +735,7 @@ static void BidirectionalScrollTest(HWND fixture,const std::wstring& prefix,bool
             // thread, just as physical input arrives independently of it.
             auto producer=std::async(std::launch::async,[&]{return SendInput(UINT(burst.size()),burst.data(),sizeof(INPUT));});while(producer.wait_for(std::chrono::milliseconds(0))!=std::future_status::ready)PumpFor(10);winrt::check_bool(producer.get()==burst.size());PumpFor(1600);
             const size_t delivered=scrollDeliveries.size()-burstStart;if(delivered<1||delivered>2)throw std::runtime_error("Rapid wheel input was forwarded directly or replayed as a long queue");
-            for(size_t i=burstStart;i<scrollDeliveries.size();++i){const auto& d=scrollDeliveries[i];if(std::abs(d.target-d.before)>40||std::abs(d.delta)>60)throw std::runtime_error("Controlled step exceeds slow-scroll target");if(i>burstStart&&d.time-scrollDeliveries[i-1].time<345)throw std::runtime_error("Controlled steps violate minimum pacing");}
+            for(size_t i=burstStart;i<scrollDeliveries.size();++i){const auto& d=scrollDeliveries[i];if(std::abs(d.target-d.before)>40||std::abs(d.delta)>60)throw std::runtime_error("Controlled step exceeds safe overlap target");}
             const auto afterBurst=scrollDeliveries.size();PumpFor(800);if(scrollDeliveries.size()!=afterBurst)throw std::runtime_error("Source continued scrolling after burst had stopped");
             const int rapidMaximum=fixtureOffset;wheel(120,240);if(fixtureOffset>=rapidMaximum)throw std::runtime_error("Reverse wheel retained old pending direction");finishExact(240,std::min(240,fixtureOffset),rapidMaximum,L"-burst.png");
 
@@ -734,9 +771,9 @@ static void BidirectionalScrollTest(HWND fixture,const std::wstring& prefix,bool
         std::cout<<"BIDIRECTIONAL: whole-body exact up/down composition"<<std::endl;
         open(true,240,480);wheel(120,240);wheel(120,240);const int fullMinimum=fixtureOffset;wheel(-120,240);wheel(-120,240);wheel(-120,240);const int fullMaximum=fixtureOffset;wheel(120,240);
         finishExact(240,fullMinimum,fullMaximum,L"-whole.png");
-        // Validate OS queue timestamps, not callback time after painting: queue
-        // scheduling can compress consecutive receive timestamps by one tick.
-        for(size_t i=1;i<scrollDeliveries.size();++i)if(DWORD(scrollDeliveries[i].postedTime-scrollDeliveries[i-1].postedTime)<345)throw std::runtime_error("Manual/automatic/supplement posting violates slow pacing");
+        // Successful stable matching authorizes the next action; whole-notch
+        // supplements still retain their independent minimum delivery delay.
+        dispatchAssertions.Verify();
         if(!wholeOnly){open(false,120,480);wheel(-120,120);const int closedHeight=session->Progress().height;DestroyWindow(fixture);wait([&]{return session->Progress().status.find(L"已关闭")!=std::wstring::npos;},2500,"Closed source did not pause capture");if(session->Progress().height!=closedHeight||session->Progress().atTop||session->Progress().atEnd)throw std::runtime_error("Closed source corrupted image or reported a boundary");}
         close();if(IsWindow(bidirectionalChild))DestroyWindow(bidirectionalChild);bidirectionalChild=nullptr;bidirectionalFixture=false;
     }catch(...){close();if(IsWindow(bidirectionalChild))DestroyWindow(bidirectionalChild);bidirectionalChild=nullptr;bidirectionalFixture=false;throw;}
@@ -1696,6 +1733,7 @@ static void ElectronScrollTest(HWND source,const std::wstring& prefix){
     auto doc=std::make_shared<ImageDocument>();bool completed=false;
     auto session=OpenLongCaptureSession(region,doc,[&](bool ok){completed=ok;},[](auto){});PumpFor(650);
     const auto before=stats();SetCursorPos(origin.x+500,origin.y+400);PumpFor(100);
+    const auto afterCursor=stats();std::cout<<"Electron cursor stage moves="<<afterCursor.moves-before.moves<<" clicks="<<afterCursor.clicks-before.clicks<<std::endl;
     INPUT wheel{};wheel.type=INPUT_MOUSE;wheel.mi.dwFlags=MOUSEEVENTF_WHEEL;wheel.mi.mouseData=120;SendInput(1,&wheel,sizeof(wheel));
     const auto end=GetTickCount64()+5000;while(GetTickCount64()<end){const auto p=session->Progress();if(p.actionId&&p.completedActionId>=p.actionId&&!p.inFlight)break;PumpFor(20);}
     PumpFor(200);const auto after=stats();const auto progress=session->Progress();
@@ -1732,6 +1770,148 @@ static void ElectronScrollTest(HWND source,const std::wstring& prefix){
     std::cout<<"ELECTRON SCROLL PASS: actual DOM scroll, 12 alternating wheels, upward prepend, repeated top/bottom, locked-list automatic restore/append, no cursor motion or source hover/click, edit handoff"<<std::endl;
 }
 void CaptureMemoryTests(bool enforce);
+static void PngSaveTest(const std::wstring& prefix) {
+    GUID id{}; winrt::check_hresult(CoCreateGuid(&id)); wchar_t suffix[40]{}; StringFromGUID2(id,suffix,40);
+    const std::filesystem::path directory=prefix+L"-"+suffix;
+    if(!std::filesystem::create_directory(directory)) throw std::runtime_error("Cannot create PNG test directory");
+    const auto path=directory/L"saved.png";
+    auto bytes=[&] { std::ifstream input(path,std::ios::binary); return std::vector<char>(std::istreambuf_iterator<char>(input),{}); };
+    Image original(11,7); std::fill(original.pixels.begin(),original.pixels.end(),0xff165fa3);
+    if(!SavePng(original,path.wstring())) throw std::runtime_error("Cannot save initial PNG");
+    const auto restrictedDacl=L"D:P(A;;FA;;;SY)(A;;FA;;;"+app_storage::UserSid()+L")";
+    PSECURITY_DESCRIPTOR descriptor{};
+    winrt::check_bool(ConvertStringSecurityDescriptorToSecurityDescriptorW(restrictedDacl.c_str(),SDDL_REVISION_1,&descriptor,nullptr));
+    const BOOL secured=SetFileSecurityW(path.c_str(),DACL_SECURITY_INFORMATION|PROTECTED_DACL_SECURITY_INFORMATION,descriptor);
+    LocalFree(descriptor); winrt::check_bool(secured);
+    auto dacl=[&] {
+        DWORD needed{}; GetFileSecurityW(path.c_str(),DACL_SECURITY_INFORMATION,nullptr,0,&needed);
+        std::vector<BYTE> security(needed);
+        winrt::check_bool(GetFileSecurityW(path.c_str(),DACL_SECURITY_INFORMATION,reinterpret_cast<PSECURITY_DESCRIPTOR>(security.data()),needed,&needed));
+        PACL acl{}; BOOL present{},defaulted{}; SECURITY_DESCRIPTOR_CONTROL control{}; DWORD revision{};
+        winrt::check_bool(GetSecurityDescriptorDacl(reinterpret_cast<PSECURITY_DESCRIPTOR>(security.data()),&present,&acl,&defaulted));
+        winrt::check_bool(GetSecurityDescriptorControl(reinterpret_cast<PSECURITY_DESCRIPTOR>(security.data()),&control,&revision));
+        if(!present||!acl) throw std::runtime_error("PNG security fixture lost its DACL");
+        const auto* first=reinterpret_cast<const BYTE*>(acl);
+        // ReplaceFile may update auto-inheritance bookkeeping; access-control
+        // entries and the flag preventing inherited grants must stay intact.
+        return std::pair<std::vector<BYTE>,bool>{{first,first+acl->AclSize},(control&SE_DACL_PROTECTED)!=0};
+    };
+    const auto originalDacl=dacl();
+    const auto saved=bytes();
+    if(SavePng({},path.wstring())) throw std::runtime_error("Empty image must fail to save");
+    const auto afterFailure=bytes();
+    std::cout<<"PNG invalid-input failure: original="<<saved.size()<<" bytes, retained="<<afterFailure.size()<<" bytes\n";
+    if(afterFailure!=saved) throw std::runtime_error("Failed PNG save destroyed the existing destination");
+    Image replacement(13,9); for(size_t i=0;i<replacement.pixels.size();++i)replacement.pixels[i]=0xff000000|uint32_t(i*7919);
+    Image incomplete=replacement; incomplete.pixels.pop_back();
+    if(SavePng(incomplete,path.wstring()) || bytes()!=saved) throw std::runtime_error("Incomplete image must preserve the existing destination");
+    // Permit readers and writers, but deny replacement, to force failure at
+    // publication after a valid image has been fully encoded beside the target.
+    HANDLE locked=CreateFileW(path.c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+    if(locked==INVALID_HANDLE_VALUE) winrt::throw_last_error();
+    const bool replacedWhileLocked=SavePng(replacement,path.wstring()); CloseHandle(locked);
+    if(replacedWhileLocked || bytes()!=saved) throw std::runtime_error("Failed PNG publication must preserve the existing destination");
+    if(!SavePng(replacement,path.wstring())) throw std::runtime_error("Cannot replace PNG after releasing destination");
+    if(dacl()!=originalDacl) throw std::runtime_error("PNG replacement changed the destination's explicit permissions");
+    auto factory=winrt::create_instance<IWICImagingFactory>(CLSID_WICImagingFactory);
+    winrt::com_ptr<IWICBitmapDecoder> decoder;
+    winrt::check_hresult(factory->CreateDecoderFromFilename(path.c_str(),nullptr,GENERIC_READ,WICDecodeMetadataCacheOnLoad,decoder.put()));
+    winrt::com_ptr<IWICBitmapFrameDecode> frame; winrt::check_hresult(decoder->GetFrame(0,frame.put()));
+    UINT width{},height{}; winrt::check_hresult(frame->GetSize(&width,&height));
+    if(width!=UINT(replacement.width)||height!=UINT(replacement.height)) throw std::runtime_error("PNG replacement dimensions changed");
+    winrt::com_ptr<IWICFormatConverter> converter; winrt::check_hresult(factory->CreateFormatConverter(converter.put()));
+    winrt::check_hresult(converter->Initialize(frame.get(),GUID_WICPixelFormat32bppBGRA,WICBitmapDitherTypeNone,nullptr,0,WICBitmapPaletteTypeCustom));
+    Image decoded{int(width),int(height)};
+    winrt::check_hresult(converter->CopyPixels(nullptr,width*4,UINT(decoded.pixels.size()*4),reinterpret_cast<BYTE*>(decoded.pixels.data())));
+    if(decoded.pixels!=replacement.pixels) throw std::runtime_error("PNG replacement pixels changed");
+    converter=nullptr; frame=nullptr; decoder=nullptr;
+    const auto missing=directory/L"invalid.png";
+    if(SavePng({},missing.wstring()) || std::filesystem::exists(missing)) throw std::runtime_error("Invalid PNG save must not create an output");
+    if(SavePng(replacement,(directory/L"missing"/L"file.png").wstring())) throw std::runtime_error("Missing directory must fail to save");
+    // Keep the filename within NTFS's 255-character component limit while
+    // exceeding the old target-name-plus-temporary-suffix implementation.
+    const auto longPath=std::filesystem::path(L"\\\\?\\"+std::filesystem::absolute(directory).wstring())/(std::wstring(240,L'x')+L".png");
+    if(!SavePng(replacement,longPath.wstring())) throw std::runtime_error("PNG save rejected a valid long filename");
+    std::filesystem::remove(longPath);
+    for(const auto& entry:std::filesystem::directory_iterator(directory))
+        if(entry.path()!=path) throw std::runtime_error("PNG save left an incomplete temporary file");
+    std::filesystem::remove(path); std::filesystem::remove(directory);
+    std::cout<<"PNG SAVE PASS: failed writes preserve destination, replacement round-trips pixels, no temporary files remain\n";
+}
+// Preserve the pre-optimization readback as an independent pixel oracle and
+// benchmark control. It deliberately allocates the former FromBitmap result.
+static void LegacyCompositeRecording(Image& image,const RecordingAnnotations& snapshot,AnnotationRenderer& renderer,const LaserPointer* liveLaser=nullptr) {
+    const auto& laser=liveLaser?*liveLaser:snapshot.laser;
+    if(snapshot.shapes.empty()&&!laser.visible)return;
+    renderer.SetDpi(snapshot.dpi);
+    HBITMAP bitmap=ToBitmap(image); if(!bitmap)throw std::bad_alloc();
+    HDC dc=CreateCompatibleDC(nullptr); auto old=SelectObject(dc,bitmap);
+    renderer.Draw(dc,snapshot.shapes); DrawLaser(dc,laser);
+    SelectObject(dc,old); DeleteDC(dc);
+    try { image=FromBitmap(bitmap); } catch(...) {DeleteObject(bitmap);throw;} DeleteObject(bitmap);
+}
+static RecordingAnnotations RecordingFixture(UINT dpi) {
+    RecordingAnnotations snapshot; snapshot.dpi=dpi;
+    for(Tool tool:{Tool::Pen,Tool::Rectangle,Tool::Ellipse,Tool::Arrow,Tool::Text}) {
+        Annotation a; a.tool=tool; a.color=RGB(255,70,70); a.size=tool==Tool::Text?24:3;
+        const int index=int(snapshot.shapes.size()); a.start={20+index*210,25}; a.end={180+index*210,145};
+        a.points={a.start,{a.start.x+25,70},{a.start.x+47,40},a.end}; a.text=L"文字 Aa 012345";
+        if(tool==Tool::Rectangle)a.clip=RECT{a.start.x+10,a.start.y,a.end.x-10,a.end.y};
+        snapshot.shapes.push_back(a);
+    }
+    snapshot.laser={{570,175},true}; return snapshot;
+}
+static void AnnotationCompositeEquivalence() {
+    size_t cases=0;
+    for(UINT dpi:{96u,144u,192u}) {
+        AnnotationRenderer renderer(dpi); auto snapshot=RecordingFixture(dpi);
+        for(uint32_t background:{0xfff7f7f7u,0xff303030u,0u}) {
+            Image source(1200,240); for(size_t i=0;i<source.pixels.size();++i)source.pixels[i]=background?background:0xff000000|uint32_t(i*7919&0xffffff);
+            const LaserPointer pointers[]={{},{{200,200},true,RGB(45,255,100),11}};
+            for(const LaserPointer* pointer:{static_cast<const LaserPointer*>(nullptr),&pointers[0],&pointers[1]}) {
+                Image expected=source,actual=source; LegacyCompositeRecording(expected,snapshot,renderer,pointer); CompositeRecording(actual,snapshot,renderer,0,pointer);
+                if(expected.pixels!=actual.pixels)throw std::runtime_error("Optimized recording pixels differ from original GDI readback");
+                ++cases;
+            }
+            snapshot.laser.visible=false; Image expected=source,actual=source;
+            LegacyCompositeRecording(expected,snapshot,renderer); renderer.Composite(actual,snapshot.shapes);
+            if(expected.pixels!=actual.pixels)throw std::runtime_error("Optimized static annotation pixels differ from original GDI readback");
+            snapshot.laser.visible=true; ++cases;
+        }
+    }
+    std::cout<<"ANNOTATION EQUIVALENCE PASS: "<<cases<<" exact pixel comparisons; all recording tools, clipped geometry, text, translucent laser, 96/144/192 DPI\n";
+}
+static void AnnotationCompositeBenchmark() {
+    AnnotationRenderer renderer(96); auto snapshot=RecordingFixture(96);
+    for(const auto size:{SIZE{1920,1080},SIZE{3840,2160}}) {
+        Image source(size.cx,size.cy); for(size_t i=0;i<source.pixels.size();++i)source.pixels[i]=0xff000000|uint32_t(i*7919&0xffffff);
+        Image expected=source; LegacyCompositeRecording(expected,snapshot,renderer);
+        uint64_t hash=1469598103934665603ull;
+        for(auto pixel:expected.pixels){hash^=pixel;hash*=1099511628211ull;}
+        std::vector<double> all[2];
+        for(int round=0;round<3;++round) {
+            std::vector<double> samples[2];
+            for(int i=0;i<43;++i)for(int order=0;order<2;++order) {
+                const int mode=(i+order+round)%2;
+                Image frame=source; const auto start=std::chrono::steady_clock::now();
+                if(mode)CompositeRecording(frame,snapshot,renderer,0); else LegacyCompositeRecording(frame,snapshot,renderer);
+                const auto ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
+                if(frame.pixels!=expected.pixels) throw std::runtime_error("Recording composition changed across identical frames");
+                if(i>=3){samples[mode].push_back(ms);all[mode].push_back(ms);}
+            }
+            for(int mode=0;mode<2;++mode) {
+                auto& values=samples[mode]; std::sort(values.begin(),values.end());
+                std::cout<<"COMPOSITE ROUND "<<round+1<<" "<<size.cx<<"x"<<size.cy<<" mode="<<(mode?"optimized":"original")
+                    <<" frames="<<values.size()<<" median_ms="<<values[values.size()/2]<<" p95_ms="<<values[size_t(values.size()*.95)-1]<<"\n";
+            }
+        }
+        for(int mode=0;mode<2;++mode) {
+            auto& values=all[mode];std::sort(values.begin(),values.end());
+            std::cout<<"COMPOSITE TOTAL "<<size.cx<<"x"<<size.cy<<" mode="<<(mode?"optimized":"original")<<" frames="<<values.size()
+                <<" median_ms="<<values[values.size()/2]<<" p95_ms="<<values[size_t(values.size()*.95)-1]<<" checksum="<<hash<<"\n";
+        }
+    }
+}
 int wmain(int argc,wchar_t** argv) {
 #ifdef PCTOOL_OCR_EVALUATION
     wchar_t evalModel[32768]{},evalTier[64]{};
@@ -1781,6 +1961,9 @@ int wmain(int argc,wchar_t** argv) {
         return preview->Window()?1:0;
     }
     try {
+        if(argc>2 && std::wstring(argv[1])==L"png-save-test") { PngSaveTest(argv[2]); return 0; }
+        if(argc>1 && std::wstring(argv[1])==L"annotation-benchmark") { AnnotationCompositeBenchmark(); return 0; }
+        if(argc>1 && std::wstring(argv[1])==L"annotation-equivalence-test") { AnnotationCompositeEquivalence(); return 0; }
         if(argc>2 && std::wstring(argv[1])==L"ocr-compare") {CompareOcr(argv[2]);return 0;}
         if(argc>3 && std::wstring(argv[1])==L"click-fixture") return ClickFixtureProcess(_wtoi(argv[2]),_wtoi(argv[3]));
         if(argc>1 && std::wstring(argv[1])==L"window-snap-test") { RunWindowSnapTests(); return 0; }
@@ -1968,6 +2151,12 @@ int wmain(int argc,wchar_t** argv) {
 
         if(argc>1&&(std::wstring(argv[1])==L"partial-scroll-test"||std::wstring(argv[1])==L"bidirectional-scroll-test"||std::wstring(argv[1])==L"bidirectional-whole-test")){
             BidirectionalScrollTest(fixture,argc>2?argv[2]:L"bidirectional-scroll",std::wstring(argv[1])==L"bidirectional-whole-test");DestroyWindow(fixture);return 0;
+        }
+        if(argc>2&&std::wstring(argv[1])==L"scroll-performance"){
+            RunScrollSessionPerformance(argv[2],argc>3?_wtoi(argv[3]):30);DestroyWindow(fixture);return 0;
+        }
+        if(argc>1&&std::wstring(argv[1])==L"scroll-input-regression"){
+            RunScrollInputDesktopRegression();DestroyWindow(fixture);return 0;
         }
         if(argc>1 && std::wstring(argv[1])==L"qq-long-test") {
             const std::wstring prefix=argc>2?argv[2]:L"qq-long";

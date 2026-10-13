@@ -25,7 +25,7 @@ void BoundaryWheel(HWND w){
     for(int direction:{1,-1}){
         SendMessageW(w,WM_MOUSEWHEEL,MAKEWPARAM(0,WORD(direction*120*100)),0);PaintPending();
         std::vector<HWND> watched{w,GetDlgItem(w,250),GetDlgItem(w,501),GetDlgItem(w,IDOK)};
-        for(int i=0;i<9;++i)watched.push_back(Field(w,300+i));
+        for(int i=0;i<10;++i)watched.push_back(Field(w,300+i));
         for(auto child:watched)SetWindowSubclass(child,BoundaryObserve,991,0);
         boundaryPaints=boundaryMoves=0;
         for(int i=0;i<30;++i)SendMessageW(i%2?w:Field(w,308),WM_MOUSEWHEEL,MAKEWPARAM(0,WORD(direction*120)),0);
@@ -75,7 +75,7 @@ void CALLBACK Tick(HWND,UINT,UINT_PTR timer,DWORD){
     switch(step++){
     case 0: BoundaryWheel(w);Check(SendMessageW(Field(w,300),HKM_GETHOTKEY,0,0)==MAKEWORD('A',HOTKEYF_CONTROL|HOTKEYF_ALT));set(1,MAKEWORD('A',HOTKEYF_CONTROL|HOTKEYF_ALT));submit();Check(calls==0&&IsWindow(w));break;
     case 1: set(1,MAKEWORD(0,HOTKEYF_CONTROL));submit();Check(calls==0&&IsWindow(w));break;
-    case 2: SendMessageW(w,WM_COMMAND,501,0);Check(SendMessageW(Field(w,301),HKM_GETHOTKEY,0,0)==MAKEWORD('C',HOTKEYF_ALT));for(int i=5;i<9;++i)Check(SendMessageW(Field(w,300+i),HKM_GETHOTKEY,0,0)==0);set(4,MAKEWORD('T',HOTKEYF_CONTROL|HOTKEYF_SHIFT));submit();Check(calls==1&&IsWindow(w));break;
+    case 2: SendMessageW(w,WM_COMMAND,501,0);Check(SendMessageW(Field(w,301),HKM_GETHOTKEY,0,0)==MAKEWORD('C',HOTKEYF_ALT));for(int i=5;i<10;++i)Check(SendMessageW(Field(w,300+i),HKM_GETHOTKEY,0,0)==0);set(4,MAKEWORD('T',HOTKEYF_CONTROL|HOTKEYF_SHIFT));submit();Check(calls==1&&IsWindow(w));break;
     case 3: submit();Check(calls==2&&IsWindowVisible(w));SendMessageW(w,WM_CLOSE,0,0);Check(!IsWindow(w));KillTimer(nullptr,timer);break;
     default: failed=true;DestroyWindow(w);KillTimer(nullptr,timer);break;
     }
@@ -97,7 +97,7 @@ int main(int argc,char** argv){
     hotkeys::ShowSettings(nullptr,hotkeys::Defaults,[](const hotkeys::Bindings& values,std::wstring& error){++calls;Check(values[4]==hotkeys::Binding{MOD_CONTROL|MOD_SHIFT,'T'});error=L"模拟占用：请修改后重试。";return calls==2;});
     SetTimer(nullptr,0,100,[](HWND,UINT,UINT_PTR timer,DWORD){KillTimer(nullptr,timer);auto w=FindWindowW(L"PcTool.HotkeySettings",nullptr);SendMessageW(w,WM_COMMAND,IDCANCEL,0);});
     hotkeys::ShowSettings(nullptr,hotkeys::Defaults,[](const hotkeys::Bindings&,std::wstring&){failed=true;return false;});
-    SetTimer(nullptr,0,100,[](HWND,UINT,UINT_PTR timer,DWORD){KillTimer(nullptr,timer);auto w=FindWindowW(L"PcTool.HotkeySettings",nullptr);Check(GetDlgItem(w,IDCANCEL)==nullptr);for(int i=0;i<9;++i)SendMessageW(Field(w,300+i),HKM_SETHOTKEY,0,0);SendMessageW(w,WM_COMMAND,IDOK,0);Check(IsWindowVisible(w));SendMessageW(w,WM_CLOSE,0,0);Check(!IsWindow(w));});
+    SetTimer(nullptr,0,100,[](HWND,UINT,UINT_PTR timer,DWORD){KillTimer(nullptr,timer);auto w=FindWindowW(L"PcTool.HotkeySettings",nullptr);Check(GetDlgItem(w,IDCANCEL)==nullptr);for(int i=0;i<10;++i)SendMessageW(Field(w,300+i),HKM_SETHOTKEY,0,0);SendMessageW(w,WM_COMMAND,IDOK,0);Check(IsWindowVisible(w));SendMessageW(w,WM_CLOSE,0,0);Check(!IsWindow(w));});
     hotkeys::ShowSettings(nullptr,hotkeys::Defaults,[](const hotkeys::Bindings& values,std::wstring&){for(auto value:values)Check(hotkeys::Empty(value));return true;});
     int closeStage=0;
     static int* phase;phase=&closeStage;
@@ -123,5 +123,5 @@ int main(int argc,char** argv){
     });
     hotkeys::ShowSettings(nullptr,hotkeys::Defaults,[](const hotkeys::Bindings&,std::wstring&){failed=true;return false;});
     if(failed){std::cerr<<"Hotkey settings failed\n";return 1;}
-    std::cout<<"PASS: nine bindings, duplicate, invalid, all unbound, defaults, save failure/retry, dirty close cancel/discard\n";
+    std::cout<<"PASS: ten bindings, duplicate, invalid, all unbound, defaults, save failure/retry, dirty close cancel/discard\n";
 }

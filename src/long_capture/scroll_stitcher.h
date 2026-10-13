@@ -22,7 +22,8 @@ public:
     double Difference(const Image& a,const Image& b,std::optional<POINT> anchor={})const;
     void MapAnnotations(std::vector<Annotation>& annotations,UINT dpi=96)const;
 private:
-    uint32_t Pixel(int x,int y)const;
+    struct Row {const uint32_t* sides;const uint32_t* body;};
+    Row FindRow(int y)const;
     struct Strip { int begin{}; Image image; };
     Image first_,previous_,footer_;
     std::vector<Strip> strips_; // Nonoverlapping body intervals, sorted by begin.

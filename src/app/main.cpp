@@ -1,6 +1,8 @@
 #include "shared/platform/app_storage.h"
 #include "system_tools/paint.h"
 #include "system_tools/task_manager.h"
+#include "system_tools/powershell.h"
+#include "system_tools/remote_desktop.h"
 #include "archive/archive_service.h"
 #include "app/app_messages.h"
 #include "app/app_settings.h"
@@ -148,7 +150,8 @@ private:
         if(!clipboardHotkeyRegistered_)MessageBoxW(window_,(L"无法注册 "+hotkeys::Text(key)+L"，快捷键可能已被其他软件占用。仍可从菜单打开剪切板历史。").c_str(),L"PcTool",MB_OK|MB_ICONWARNING);
     }
     void UpdateExtraHotkeys(){
-        for(int i=0;i<4;++i){UnregisterHotKey(window_,20+i);if(editingHotkeys_||hotkeys::Empty(settings_.Hotkeys()[5+i]))continue;const auto binding=settings_.Hotkeys()[5+i];if(!RegisterHotKey(window_,20+i,binding.modifiers|MOD_NOREPEAT,binding.key))MessageBoxW(window_,(std::wstring(hotkeys::Names[5+i])+L"：无法注册 "+hotkeys::Text(binding)+L"，请检查快捷键占用。").c_str(),L"PcTool",MB_OK|MB_ICONWARNING);}
+        constexpr size_t actions[]={5,9,6,7,8};
+        for(int i=0;i<5;++i){UnregisterHotKey(window_,20+i);const auto action=actions[i];if(editingHotkeys_||hotkeys::Empty(settings_.Hotkeys()[action]))continue;const auto binding=settings_.Hotkeys()[action];if(!RegisterHotKey(window_,20+i,binding.modifiers|MOD_NOREPEAT,binding.key))MessageBoxW(window_,(std::wstring(hotkeys::Names[action])+L"：无法注册 "+hotkeys::Text(binding)+L"，请检查快捷键占用。").c_str(),L"PcTool",MB_OK|MB_ICONWARNING);}
     }
     void SetHotkeyCapture(bool capture){
         if(editingHotkeys_==capture)return;editingHotkeys_=capture;if(!IsWindow(window_))return;
@@ -234,7 +237,7 @@ private:
 
         case WM_HOTKEY:
             if(self->editingHotkeys_)return 0;
-            if(wParam>=20&&wParam<24){constexpr UINT commands[]={kLaunchTaskManagerMessage,kLaunchPaintMessage,kOpenArchiveManagerMessage,kShowHotkeySettingsMessage};PostMessageW(window,commands[wParam-20],0,0);return 0;}
+            if(wParam>=20&&wParam<25){constexpr UINT commands[]={kLaunchTaskManagerMessage,kLaunchRemoteDesktopMessage,kLaunchPaintMessage,kOpenArchiveManagerMessage,kShowHotkeySettingsMessage};PostMessageW(window,commands[wParam-20],0,0);return 0;}
             if(self->translation_.HandleHotkey(wParam))return 0;
             if (wParam == kClipboardHotkeyId) {
                 SendMessageW(window, kShowClipboardHistoryMessage, 0, 0);
@@ -259,6 +262,10 @@ private:
             return 0;
         case kLaunchTaskManagerMessage:
             LaunchTaskManager(window);return 0;
+        case kLaunchPowerShellMessage:
+            LaunchAdministratorPowerShell(window);return 0;
+        case kLaunchRemoteDesktopMessage:
+            LaunchRemoteDesktop(window);return 0;
         case kPrepareTranslationMenuMessage:
             self->menuSource_=self->menuSourceTracker_.Freeze();return 0;
         case kInvokeTranslationMenuMessage:
@@ -291,7 +298,7 @@ private:
             return 0;
 
         case WM_DESTROY:
-            for(int i=0;i<4;++i)UnregisterHotKey(window,20+i);
+            for(int i=0;i<5;++i)UnregisterHotKey(window,20+i);
             self->taskbarMonitor_.Destroy();
             self->RemoveTray();
             self->translation_.Shutdown();

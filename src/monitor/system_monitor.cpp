@@ -47,7 +47,9 @@ SystemMonitor::~SystemMonitor() {
     }
 }
 
-void SystemMonitor::Sample(bool includeCpuFrequency) {
+void SystemMonitor::Sample(bool includeCpuFrequency, bool includeGpuUsage) {
+    gpuSampler_.Enable(includeGpuUsage);
+    metrics_.gpuUsagePercent = gpuSampler_.Value();
     SampleCpuUsage();
     SampleMemory();
     SampleNetwork();

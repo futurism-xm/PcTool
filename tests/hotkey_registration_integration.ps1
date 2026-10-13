@@ -41,7 +41,7 @@ try {
  [void][HotkeyProbe]::PostMessage($controller,0x806c,[IntPtr]::Zero,[IntPtr]::Zero)
  $editor=Wait-Window 'PcTool.HotkeySettings'
  $viewport=[HotkeyProbe]::GetDlgItem($editor,250)
- for($i=0;$i -lt 9;$i++){[void][HotkeyProbe]::SendMessage([HotkeyProbe]::GetDlgItem($viewport,300+$i),0x401,[IntPtr](0x700+0x77+$i),[IntPtr]::Zero)}
+ for($i=0;$i -lt 10;$i++){[void][HotkeyProbe]::SendMessage([HotkeyProbe]::GetDlgItem($viewport,300+$i),0x401,[IntPtr](0x700+0x77+$i),[IntPtr]::Zero)}
  # Reserve the proposed clipboard binding in this independent process.
  if(![HotkeyProbe]::RegisterHotKey([IntPtr]::Zero,920,7,0x78)){throw 'Test key already occupied'}
  [void][HotkeyProbe]::SendMessage($editor,0x111,[IntPtr]1,[IntPtr]::Zero)
@@ -50,8 +50,8 @@ try {
  [void][HotkeyProbe]::SendMessage($editor,0x111,[IntPtr]1,[IntPtr]::Zero)
  Start-Sleep -Milliseconds 300
  if(![HotkeyProbe]::IsWindowVisible($editor)){throw 'Save closed editor'}
- for($i=0;$i -lt 9;$i++){if((Read-Hotkey $i) -ne (0x70000+0x77+$i)){throw 'Persistence mismatch'}}
- for($i=5;$i -lt 9;$i++){if([HotkeyProbe]::RegisterHotKey([IntPtr]::Zero,930+$i,7,0x77+$i)){[void][HotkeyProbe]::UnregisterHotKey([IntPtr]::Zero,930+$i);throw 'New optional action was not registered'}}
+ for($i=0;$i -lt 10;$i++){if((Read-Hotkey $i) -ne (0x70000+0x77+$i)){throw 'Persistence mismatch'}}
+ for($i=5;$i -lt 10;$i++){if([HotkeyProbe]::RegisterHotKey([IntPtr]::Zero,930+$i,7,0x77+$i)){[void][HotkeyProbe]::UnregisterHotKey([IntPtr]::Zero,930+$i);throw 'New optional action was not registered'}}
  [HotkeyProbe]::Chord()
  $history=Wait-Window 'PcTool.ClipboardHistory' $true
  if(![HotkeyProbe]::IsWindowVisible($history)){throw 'New shortcut did not show clipboard'}
@@ -84,11 +84,11 @@ try {
  [HotkeyProbe]::Chord()
  $history=Wait-Window 'PcTool.ClipboardHistory' $true
  [void][HotkeyProbe]::SendMessage($history,0x10,[IntPtr]::Zero,[IntPtr]::Zero)
- for($i=0;$i -lt 9;$i++){[void][HotkeyProbe]::SendMessage([HotkeyProbe]::GetDlgItem($viewport,300+$i),0x401,[IntPtr]::Zero,[IntPtr]::Zero)}
+ for($i=0;$i -lt 10;$i++){[void][HotkeyProbe]::SendMessage([HotkeyProbe]::GetDlgItem($viewport,300+$i),0x401,[IntPtr]::Zero,[IntPtr]::Zero)}
  [void][HotkeyProbe]::SendMessage($editor,0x111,[IntPtr]1,[IntPtr]::Zero)
  Start-Sleep -Milliseconds 300
- for($i=0;$i -lt 9;$i++){if((Read-Hotkey $i) -ne 0){throw 'Unbound value not persisted'};if(![HotkeyProbe]::RegisterHotKey([IntPtr]::Zero,930+$i,7,0x77+$i)){throw 'Unbound shortcut still registered'};[void][HotkeyProbe]::UnregisterHotKey([IntPtr]::Zero,930+$i)}
- Write-Output 'PASS: nine persisted bindings, external conflict rejected, optional actions, restart, globals usable while settings open, focused binding capture only, Escape restores globals, clear all releases registrations'
+ for($i=0;$i -lt 10;$i++){if((Read-Hotkey $i) -ne 0){throw 'Unbound value not persisted'};if(![HotkeyProbe]::RegisterHotKey([IntPtr]::Zero,930+$i,7,0x77+$i)){throw 'Unbound shortcut still registered'};[void][HotkeyProbe]::UnregisterHotKey([IntPtr]::Zero,930+$i)}
+ Write-Output 'PASS: ten persisted bindings, external conflict rejected, optional actions, restart, globals usable while settings open, focused binding capture only, Escape restores globals, clear all releases registrations'
 } finally {
  [void][HotkeyProbe]::UnregisterHotKey([IntPtr]::Zero,920)
  Stop-TestApp

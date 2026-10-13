@@ -64,7 +64,48 @@ public:
     void Join(){if(thread_.joinable())thread_.join();}
 };
 translation::SourceConfig Config(translation::SourceKind kind){auto s=translation::NewSource(kind);s.key=L"fixture-secret";s.model=L"fixture-model";s.region=L"eastasia";s.appId=L"fixture-app";s.enabled=s.verified=true;return s;}
+void StreamLineEndings(){
+    using namespace translation;
+    for(const std::string ending:{"\n","\r\n","\r"}){
+        const std::string input=u8"data: {\"choices\":[{\"delta\":{\"content\":\"你\"}}]}"+ending+ending+
+            u8"data: {\"choices\":[{\"delta\":{\"content\":\"好\"}}]}"+ending+ending+"data: [DONE]"+ending+ending;
+        // One-byte chunks split both UTF-8 code points and CRLF boundaries.
+        for(const size_t chunkSize:{size_t(1),input.size()}){
+            EventStream stream;std::vector<std::wstring> progress;
+            for(size_t at=0;at<input.size();at+=chunkSize)stream.Feed(input.substr(at,chunkSize),[&](auto value){progress.push_back(std::move(value));});
+            stream.Finish([&](auto value){progress.push_back(std::move(value));});
+            Check(stream.error.empty()&&stream.text==L"你好"&&progress==std::vector<std::wstring>{L"你",L"你好"},"SSE LF/CRLF/CR line endings or split chunks");
+        }
+    }
+    EventStream live;std::vector<std::wstring> progress;
+    live.Feed(u8"data: {\"choices\":[{\"delta\":{\"content\":\"你\"}}]}\r\r",[&](auto value){progress.push_back(std::move(value));});
+    Check(progress==std::vector<std::wstring>{L"你"},"SSE CR event waited for another chunk or EOF");
+    live.Feed("\n",[&](auto value){progress.push_back(std::move(value));});
+    live.Finish([&](auto value){progress.push_back(std::move(value));});
+    Check(progress.size()==1&&live.error.empty(),"split CRLF dispatched the event twice");
+}
+void CredentialRedaction(){
+    using namespace translation;
+    for(const auto* key:{L"fixture-secret",L"[",L"密钥",L"[密钥已隐藏]"}){
+        auto config=Config(SourceKind::OpenAI);config.key=key;
+        auto provider=MakeSourceProviderForTest(config,[secret=config.key](const HttpMessage&,auto,auto){
+            winrt::Windows::Data::Json::JsonObject root,error;
+            error.SetNamedValue(L"message",winrt::Windows::Data::Json::JsonValue::CreateStringValue(L"Denied "+secret+L" + "+secret));
+            root.SetNamedValue(L"error",error);return std::make_pair(401u,winrt::to_string(root.Stringify()));
+        });
+        std::promise<TranslationResult> done;auto result=done.get_future();
+        provider->Translate(L"Hello",std::make_shared<capture::Cancellation>(),[&](auto value){done.set_value(std::move(value));});
+        if(result.wait_for(std::chrono::seconds(2))!=std::future_status::ready){
+            // A regression loops inside the provider; unwinding its future
+            // would wait forever and prevent the test timeout from reporting.
+            std::cerr<<"FAIL: credential redaction did not terminate"<<std::endl;ExitProcess(1);
+        }
+        const auto value=result.get();
+        Check(value.text.empty()&&value.error.find(L"Denied [密钥已隐藏] + [密钥已隐藏]")!=std::wstring::npos,"credential redaction skipped repeated secret");
+    }
+}
 void Core(const std::filesystem::path& output){
+    StreamLineEndings();CredentialRedaction();
     std::cout<<"source store"<<std::endl;
     using namespace translation;using namespace winrt::Windows::Data::Json;
     for(const auto* endpoint:{L"http://192.0.2.10:8080/v1",L"http://example.invalid/v1",L"https://example.invalid:8443/v1",L"http://localhost:8080/v1"}){

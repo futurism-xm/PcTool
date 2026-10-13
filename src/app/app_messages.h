@@ -15,3 +15,5 @@ constexpr UINT kShowHotkeySettingsMessage = WM_APP + 108;
 constexpr UINT kLaunchTaskManagerMessage = WM_APP + 109;
 constexpr UINT kPrepareTranslationMenuMessage = WM_APP + 110;
 constexpr UINT kInvokeTranslationMenuMessage = WM_APP + 111;
+constexpr UINT kLaunchPowerShellMessage = WM_APP + 112;
+constexpr UINT kLaunchRemoteDesktopMessage = WM_APP + 113;

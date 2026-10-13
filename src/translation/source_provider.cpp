@@ -81,7 +81,15 @@ public:
                 if(result.text.empty()&&result.error.empty())result.error=L"翻译源未返回内容";
             }catch(const winrt::hresult_canceled&){return;}catch(const winrt::hresult_error& e){result.error=e.message().c_str();}catch(...){result.error=L"无法解析翻译服务响应";}
             // A provider error must never echo a configured credential into the UI.
-            if(!config.key.empty()){size_t at{};while((at=result.error.find(config.key))!=std::wstring::npos)result.error.replace(at,config.key.size(),L"[密钥已隐藏]");}
+            if(!config.key.empty()){
+                const std::wstring hidden=L"[密钥已隐藏]";size_t at{};
+                while((at=result.error.find(config.key,at))!=std::wstring::npos){
+                    result.error.replace(at,config.key.size(),hidden);
+                    // A user-supplied key may itself occur in the marker.
+                    // Continue after the replacement, never redact it again.
+                    at+=hidden.size();
+                }
+            }
             if(!cancel->requested)done(std::move(result));
         }));
     }
@@ -114,7 +122,21 @@ void EventStream::Dispatch(const TranslationProvider::Progress& progress){
     if(event_.empty())return;if(event_=="[DONE]"){event_.clear();return;}
     try{auto root=Obj(event_);if(root.HasKey(L"error"))error=root.GetNamedValue(L"error").Stringify().c_str();else{auto choices=root.GetNamedArray(L"choices");if(choices.Size()){auto delta=choices.GetObjectAt(0).GetNamedObject(L"delta");const auto value=delta.GetNamedValue(L"content",JsonValue::CreateNullValue());if(value.ValueType()==JsonValueType::String){text+=value.GetString();if(progress)progress(text);}}}}catch(...){error=L"流式翻译响应格式无效";}event_.clear();
 }
-void EventStream::Feed(const std::string& bytes,const TranslationProvider::Progress& progress){pending_+=bytes;size_t end;while((end=pending_.find('\n'))!=std::string::npos){auto line=pending_.substr(0,end);pending_.erase(0,end+1);if(!line.empty()&&line.back()=='\r')line.pop_back();if(line.empty())Dispatch(progress);else if(line.rfind("data:",0)==0){auto value=line.substr(5);if(!value.empty()&&value[0]==' ')value.erase(0,1);if(!event_.empty())event_+='\n';event_+=value;}}}
+void EventStream::Feed(const std::string& bytes,const TranslationProvider::Progress& progress){
+    size_t begin{};
+    if(afterCr_&&!bytes.empty()){afterCr_=false;if(bytes.front()=='\n')begin=1;}
+    pending_.append(bytes,begin,std::string::npos);size_t end;
+    while((end=pending_.find_first_of("\r\n"))!=std::string::npos){
+        // SSE accepts CR, LF and CRLF. Dispatch CR immediately, but suppress
+        // a following LF even when it arrives in the next network chunk.
+        const bool cr=pending_[end]=='\r';
+        afterCr_=cr&&end+1==pending_.size();
+        const size_t terminator=cr&&end+1<pending_.size()&&pending_[end+1]=='\n'?2:1;
+        auto line=pending_.substr(0,end);pending_.erase(0,end+terminator);
+        if(line.empty())Dispatch(progress);
+        else if(line.rfind("data:",0)==0){auto value=line.substr(5);if(!value.empty()&&value[0]==' ')value.erase(0,1);if(!event_.empty())event_+='\n';event_+=value;}
+    }
+}
 void EventStream::Finish(const TranslationProvider::Progress& progress){if(!pending_.empty())Feed("\n",progress);Dispatch(progress);}
 std::shared_ptr<TranslationProvider> MakeSourceProvider(const SourceConfig& config){return std::make_shared<Provider>(config,Request);}
 std::pair<unsigned,std::string> SendTranslationHttp(const HttpMessage& message,std::shared_ptr<capture::Cancellation> cancel,std::function<void(const std::string&)> progress){return Request(message,std::move(cancel),std::move(progress));}

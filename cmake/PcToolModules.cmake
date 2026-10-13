@@ -2,6 +2,7 @@
 set(PCTOOL_CPP_SOURCES)
 set(PCTOOL_LOCAL_HEADERS)
 list(APPEND PCTOOL_LOCAL_HEADERS src/shared/platform/app_storage.h)
+list(APPEND PCTOOL_LOCAL_HEADERS src/system_tools/powershell.h src/system_tools/remote_desktop.h)
 list(APPEND PCTOOL_CPP_SOURCES src/hotkeys/hotkey_settings.cpp)
 list(APPEND PCTOOL_LOCAL_HEADERS src/hotkeys/hotkey_settings.h src/shared/platform/hotkey_binding.h)
 set(PCTOOL_TRANSLATION_SOURCES
@@ -22,6 +23,7 @@ list(APPEND PCTOOL_LOCAL_HEADERS
     src/translation/source_confirmation.h
     src/translation/source_icons.h
     src/translation/translation_input_watch.h
+    src/translation/clipboard_source.h
     src/translation/translation_controller.h
     src/translation/translation_capture.h
     src/translation/translation_view.h
@@ -74,6 +76,8 @@ list(APPEND PCTOOL_CPP_SOURCES ${PCTOOL_LONG_CAPTURE_SOURCES})
 list(APPEND PCTOOL_LOCAL_HEADERS
     src/long_capture/long_capture_session.h
     src/long_capture/scroll_stitcher.h
+    src/long_capture/scroll_input.h
+    src/long_capture/scroll_trace.h
     src/long_capture/scroll_annotation_mapping.h
 )
 
@@ -84,6 +88,7 @@ set(PCTOOL_MONITOR_SOURCES
 list(APPEND PCTOOL_CPP_SOURCES ${PCTOOL_MONITOR_SOURCES})
 list(APPEND PCTOOL_LOCAL_HEADERS
     src/monitor/system_monitor.h
+    src/monitor/gpu_monitor.h
     src/monitor/monitor_trace.h
     src/monitor/taskbar_monitor_window.h
 )

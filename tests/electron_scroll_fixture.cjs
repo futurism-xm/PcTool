@@ -9,6 +9,7 @@ const largeFirst=process.argv.includes('--large-first-wheel');
 if (!integration || !output) throw new Error('Expected integration executable and output prefix');
 const prefix = path.resolve(output);
 fs.writeFileSync(prefix+'-versions.json',JSON.stringify(process.versions,null,2));
+fs.writeFileSync(prefix+'-events.jsonl','');
 app.setPath('userData', path.join(path.dirname(prefix), 'electron-scroll-profile'));
 app.commandLine.appendSwitch('force-device-scale-factor', '1');
 app.commandLine.appendSwitch('disable-background-timer-throttling');
@@ -17,6 +18,9 @@ process.on('uncaughtException', error => {fs.writeFileSync(prefix+'-fixture-erro
 ipcMain.on('stats', (_, stats) => {
   fs.writeFileSync(prefix + '-stats.tmp', stats.join(' '));
   fs.renameSync(prefix + '-stats.tmp', prefix + '-stats.txt');
+});
+ipcMain.on('input-event', (_, event) => {
+  fs.appendFileSync(prefix + '-events.jsonl', JSON.stringify(event) + '\n');
 });
 ipcMain.once('pixels', (_, rgba) => {
   const bgra=Buffer.from(rgba);for(let i=0;i<bgra.length;i+=4){const red=bgra[i];bgra[i]=bgra[i+2];bgra[i+2]=red;}
@@ -40,7 +44,8 @@ app.whenReady().then(() => {
   <aside>Fixed navigation<br>固定侧栏</aside><header>Independent Electron wheel routing regression</header><div id="hover">Hover must remain blocked during capture</div><div id="list"><canvas width="450" height="2000"></canvas></div>
   <script>const {ipcRenderer}=require('electron');const list=document.querySelector('#list'),canvas=document.querySelector('canvas'),ctx=canvas.getContext('2d');
   ctx.fillStyle='white';ctx.fillRect(0,0,450,2000);for(let row=0;row<66;row++){ctx.fillStyle='#303030';ctx.font='16px Segoe UI';ctx.fillText('记录 '+row+'  Task '+(row*7919)+' complete / 长截图',12,row*30+20);ctx.fillStyle='#dcdcdc';ctx.fillRect(0,row*30+29,450,1);}
-  let wheels=0,moves=0,clicks=0;document.addEventListener('wheel',e=>{wheels++;if(${largeFirst}&&wheels===1){e.preventDefault();list.scrollTop+=Math.sign(e.deltaY)*100;}},{passive:false});document.addEventListener('mousemove',()=>moves++);document.addEventListener('mousedown',()=>clicks++);
+  function record(e){ipcRenderer.send('input-event',{type:e.type,time:performance.now(),timeStamp:e.timeStamp,screenX:e.screenX,screenY:e.screenY,clientX:e.clientX,clientY:e.clientY,movementX:e.movementX,movementY:e.movementY,deltaY:e.deltaY,isTrusted:e.isTrusted,target:e.target.id||e.target.tagName,offset:list.scrollTop});}
+  let wheels=0,moves=0,clicks=0;document.addEventListener('wheel',e=>{record(e);wheels++;if(${largeFirst}&&wheels===1){e.preventDefault();list.scrollTop+=Math.sign(e.deltaY)*100;}},{passive:false});document.addEventListener('mousemove',e=>{record(e);moves++;});document.addEventListener('mousedown',e=>{record(e);clicks++;});
   ipcRenderer.send('pixels',ctx.getImageData(0,0,450,2000).data);
   list.scrollTop=600;setInterval(()=>ipcRenderer.send('stats',[list.scrollTop,wheels,moves,clicks]),40);setTimeout(()=>ipcRenderer.send('ready'),200);
   </script>`));

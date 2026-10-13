@@ -21,7 +21,6 @@
 #include <gdiplus.h>
 #include <imm.h>
 #include <windowsx.h>
-#include <wincodec.h>
 
 #include <algorithm>
 #include <array>
@@ -5144,46 +5143,8 @@ bool ScreenshotOverlay::SaveSelectionToPng() {
 
 bool ScreenshotOverlay::SaveBitmapAsPng(
     HBITMAP bitmap, const std::wstring& path) const {
-    IWICImagingFactory* factory = nullptr;
-    IWICBitmap* source = nullptr;
-    IWICStream* stream = nullptr;
-    IWICBitmapEncoder* encoder = nullptr;
-    IWICBitmapFrameEncode* frame = nullptr;
-    IPropertyBag2* properties = nullptr;
-    bool succeeded = false;
-
-    HRESULT result = CoCreateInstance(
-        CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
-        IID_PPV_ARGS(&factory));
-    if (SUCCEEDED(result)) {
-        result = factory->CreateBitmapFromHBITMAP(
-            bitmap, nullptr, WICBitmapIgnoreAlpha, &source);
-    }
-    if (SUCCEEDED(result)) result = factory->CreateStream(&stream);
-    if (SUCCEEDED(result)) result = stream->InitializeFromFilename(path.c_str(), GENERIC_WRITE);
-    if (SUCCEEDED(result)) result = factory->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder);
-    if (SUCCEEDED(result)) result = encoder->Initialize(stream, WICBitmapEncoderNoCache);
-    if (SUCCEEDED(result)) result = encoder->CreateNewFrame(&frame, &properties);
-    if (SUCCEEDED(result)) result = frame->Initialize(properties);
-
-    UINT width = 0;
-    UINT height = 0;
-    if (SUCCEEDED(result)) result = source->GetSize(&width, &height);
-    if (SUCCEEDED(result)) result = frame->SetSize(width, height);
-    WICPixelFormatGUID format = GUID_WICPixelFormat32bppBGRA;
-    if (SUCCEEDED(result)) result = frame->SetPixelFormat(&format);
-    if (SUCCEEDED(result)) result = frame->WriteSource(source, nullptr);
-    if (SUCCEEDED(result)) result = frame->Commit();
-    if (SUCCEEDED(result)) result = encoder->Commit();
-    succeeded = SUCCEEDED(result);
-
-    if (properties) properties->Release();
-    if (frame) frame->Release();
-    if (encoder) encoder->Release();
-    if (stream) stream->Release();
-    if (source) source->Release();
-    if (factory) factory->Release();
-    return succeeded;
+    try { return capture::SavePng(capture::FromBitmap(bitmap),path); }
+    catch(...) { return false; }
 }
 
 void ScreenshotOverlay::Finish(bool copyToClipboard) {

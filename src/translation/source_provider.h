@@ -13,6 +13,7 @@ public:
     std::wstring text,error;
 private:
     std::string pending_,event_;
+    bool afterCr_{};
     void Dispatch(const TranslationProvider::Progress& progress);
 };
 std::shared_ptr<TranslationProvider> MakeSourceProvider(const SourceConfig&);

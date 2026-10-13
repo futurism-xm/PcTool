@@ -98,9 +98,13 @@ namespace detail {
 inline bool Referenced(const std::filesystem::path& path,const std::set<std::wstring>& referenced) {
     const auto name=path.lexically_normal().wstring();
     for(const auto& item:referenced) {
-        if(_wcsicmp(item.c_str(),name.c_str())==0)return true;
+        // lexically_normal retains a trailing separator on directory paths.
+        // Compare at the component boundary so either spelling protects it.
+        auto length=item.size();while(length&&(item[length-1]==L'\\'||item[length-1]==L'/'))--length;
+        if(!length||name.size()<length||_wcsnicmp(name.c_str(),item.c_str(),length)!=0)continue;
+        if(name.size()==length)return true;
         // A clipboard directory reference protects its descendants too.
-        if(name.size()>item.size()&&_wcsnicmp(name.c_str(),item.c_str(),item.size())==0&&name[item.size()]==L'\\')return true;
+        if(name[length]==L'\\')return true;
     }return false;
 }
 inline bool ExpiredFile(HANDLE file,ULONGLONG today) {

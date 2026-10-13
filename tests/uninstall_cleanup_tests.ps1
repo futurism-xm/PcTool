@@ -1,118 +1,140 @@
 param([string]$Output)
-$ErrorActionPreference = 'Stop'
-$root = Split-Path -Parent $PSScriptRoot
-if (!$Output) { $Output = Join-Path $root 'out/uninstall-cleanup-tests' }
-if (!( [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    throw 'Deferred deletion tests require an elevated test session'
+$ErrorActionPreference='Stop'
+$project=Split-Path -Parent $PSScriptRoot
+. (Join-Path $project 'packaging/cleanup-jobs.ps1')
+$namespace='PcToolTest-'+[guid]::NewGuid().ToString('N')
+if(!$Output){$Output=Join-Path $project ('out/uninstall-cleanup-tests/'+$namespace)}
+$fixture=[IO.Path]::GetFullPath($Output)
+[void](New-Item -ItemType Directory -Path $fixture -Force)
+$shell=Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
+$roots=[Collections.Generic.List[string]]::new()
+function Check([bool]$value,[string]$message){if(!$value){throw $message}}
+function Run-Action([string]$root,[string]$action,[int]$expected,[string]$manifest=''){
+ $scriptPath=Join-Path $root 'manage-data.ps1'
+ if($action -eq 'Record' -or !(Test-Path -LiteralPath $scriptPath)){$scriptPath=Join-Path $project 'packaging/manage-data.ps1'}
+ $log=Join-Path $fixture ((Split-Path -Leaf $root)+'-'+$action+'.log')
+ $arguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$scriptPath,'-Action',$action,'-Root',$root,'-CleanupNamespace',$namespace)
+ if($manifest){$arguments+=@('-Manifest',$manifest)}
+ $preference=$ErrorActionPreference;$ErrorActionPreference='Continue'
+ try{& $shell @arguments *> $log;$code=$LASTEXITCODE}finally{$ErrorActionPreference=$preference}
+ if($code -ne $expected){throw "$action returned $code, expected $expected; see $log"}
 }
-$fixture = [IO.Path]::GetFullPath((Join-Path $Output ([guid]::NewGuid().ToString('N'))))
-New-Item -ItemType Directory -Path $fixture -Force | Out-Null
-$scriptPath = Join-Path $root 'packaging/manage-data.ps1'
-$shell = "$env:SystemRoot/System32/WindowsPowerShell/v1.0/powershell.exe"
-Add-Type @'
-using System; using System.Runtime.InteropServices;
-public static class UninstallHiveFixture {
- [DllImport("advapi32.dll", CharSet=CharSet.Unicode)] public static extern int RegLoadAppKey(string path, out IntPtr key, int access, int options, int reserved);
- [DllImport("advapi32.dll")] public static extern int RegCloseKey(IntPtr key);
+function Prepare([string]$name){
+ $root=Join-Path $fixture $name;$roots.Add($root)
+ [void](New-Item -ItemType Directory -Path (Join-Path $root 'Data'),(Join-Path $root 'Cache'),(Join-Path $root 'modules/archive') -Force)
+ foreach($name in @('PcTool.exe','Uninstall.exe','PcToolUninstallHelper.exe','keep.txt')){[IO.File]::WriteAllText((Join-Path $root $name),'fixture')}
+ [IO.File]::WriteAllText((Join-Path $root 'Data/settings'),'data fixture')
+ [IO.File]::WriteAllText((Join-Path $root 'Cache/cached.png'),'cache fixture')
+ [IO.File]::WriteAllText((Join-Path $root 'modules/archive/7-zip.dll'),'extension fixture')
+ foreach($name in @('manage-data.ps1','cleanup-jobs.ps1','retry-cleanup.ps1')){Copy-Item -LiteralPath (Join-Path $project ('packaging/'+$name)) -Destination $root}
+ $manifest=Join-Path $fixture ((Split-Path -Leaf $root)+'-manifest.json')
+ @{Version=1;Files=@('PcTool.exe','modules/archive/7-zip.dll','manage-data.ps1','cleanup-jobs.ps1','retry-cleanup.ps1','PcToolUninstallHelper.exe');Directories=@('modules/archive','modules')}|ConvertTo-Json|Set-Content -LiteralPath $manifest -Encoding UTF8
+ Run-Action $root 'Record' 0 $manifest
+ [IO.File]::WriteAllText((Join-Path $root '.pctool-uninstalling'),'guard')
+ return $root
 }
-'@
-$queue = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SYSTEM\CurrentControlSet\Control\Session Manager', $true)
-$queueName = 'PendingFileRenameOperations'
-function Read-Pending { return @($queue.GetValue($queueName, [string[]]@())) }
-function Is-FixturePath([string]$path) {
-    return $path.StartsWith('\??\' + $fixture + '\', [StringComparison]::OrdinalIgnoreCase)
+function Wait-For([scriptblock]$condition,[string]$message){
+ $end=[DateTime]::UtcNow.AddSeconds(30)
+ while(!(& $condition) -and [DateTime]::UtcNow -lt $end){Start-Sleep -Milliseconds 100}
+ Check (& $condition) $message
 }
-function Remove-FixturePending {
-    # Remove only this test's unique paths; preserve all other pending operations.
-    $entries = @(Read-Pending)
-    if ($entries.Count % 2) { throw 'Unexpected pending-operation list; refusing to change it' }
-    $kept = [Collections.Generic.List[string]]::new()
-    for ($i = 0; $i -lt $entries.Count; $i += 2) {
-        if (!(Is-FixturePath $entries[$i])) { $kept.Add($entries[$i]); $kept.Add($entries[$i+1]) }
-    }
-    if ($kept.Count) { $queue.SetValue($queueName, $kept.ToArray(), [Microsoft.Win32.RegistryValueKind]::MultiString) }
-    else { $queue.DeleteValue($queueName, $false) }
+function Inject-RegistrationFailure([string]$root){
+ $library=Join-Path $root 'cleanup-jobs.ps1';$text=[IO.File]::ReadAllText($library)
+ $needle="function Register-CleanupJob([string]`$Root,[string]`$Namespace,[string]`$Kind,[object[]]`$Entries,[hashtable]`$RuntimeSource=@{}) {"
+ Check ($text.Contains($needle)) 'Failure-injection anchor missing'
+ [IO.File]::WriteAllText($library,$text.Replace($needle,$needle+"`n throw 'Injected test-only task registration failure'"))
 }
-function Run-Cleanup([string]$directory, [int]$expected) {
-    & $shell -NoProfile -ExecutionPolicy Bypass -File $scriptPath -Action Uninstall -Root $directory *> "$directory/cleanup.log"
-    if ($LASTEXITCODE -ne $expected) { throw "Cleanup returned $LASTEXITCODE, expected $expected; see $directory/cleanup.log" }
-}
-function Prepare([string]$name) {
-    $directory = Join-Path $fixture $name
-    New-Item -ItemType Directory -Path "$directory/Data/test/SevenZip", "$directory/Cache" -Force | Out-Null
-    [IO.File]::WriteAllText("$directory/PcTool.exe", 'test root marker')
-    [IO.File]::WriteAllText("$directory/keep.txt", 'unrelated user file')
-    [IO.File]::WriteAllText("$directory/Cache/ordinary.png", 'cache fixture')
-    return $directory
-}
-try {
-    $normal = Prepare 'normal'
-    Run-Cleanup $normal 0
-    if ((Test-Path "$normal/Data") -or (Test-Path "$normal/Cache") -or !(Test-Path "$normal/keep.txt")) { throw 'Normal cleanup or unrelated file protection failed' }
-    'PASS normal cleanup and unrelated files'
+$held=$null
+try{
+ $root=Prepare 'normal'
+ Inject-RegistrationFailure $root
+ Run-Action $root 'Uninstall' 0
+ Check (Test-Path -LiteralPath (Join-Path $root 'manage-data.ps1')) 'Bootstrap removed before finalization'
+ Check (Test-Path -LiteralPath (Join-Path $root '.pctool-uninstalling')) 'Guard removed before finalization'
+ Run-Action $root 'Finalize' 0
+ Check (@(Get-ChildItem -LiteralPath $root -Force).Count -eq 1) 'Normal uninstall left managed files'
+ Check (Test-Path -LiteralPath (Join-Path $root 'keep.txt')) 'Unrelated file removed'
+ 'PASS normal uninstall needs no task registration, preserves bootstrap until Finalize and keeps unrelated files'
 
-    $transient=Prepare 'transient-lock'
-    $transientFile="$transient/Data/test/SevenZip/brief.tmp"
-    $transientStream=[IO.File]::Open($transientFile,'Create','ReadWrite','None')
-    $cleanupProcess=$null
-    try {
-        $cleanupProcess=Start-Process -FilePath $shell -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',('"'+$scriptPath+'"'),'-Action','Uninstall','-Root',('"'+$transient+'"')) -WindowStyle Hidden -PassThru -RedirectStandardOutput "$transient/retry.log" -RedirectStandardError "$transient/retry-error.log"
-        $observed=$false
-        for($attempt=0;$attempt -lt 200;$attempt++){
-            if((Get-Content -LiteralPath "$transient/retry.log" -Raw -ErrorAction SilentlyContinue) -match 'Waiting for release before retry'){$observed=$true;break}
-            if($cleanupProcess.HasExited){break};Start-Sleep -Milliseconds 50
-        }
-        $transientStream.Dispose();$transientStream=$null
-        if(!$cleanupProcess.WaitForExit(10000)-or $cleanupProcess.ExitCode -ne 0 -or !$observed){throw 'Transient lock was not retried successfully'}
-        if(Test-Path "$transient/Data"){throw 'Transiently locked data survived retry'}
-        if(@(Read-Pending | Where-Object {$_ -like ('*'+$transient+'*')}).Count){throw 'Transient lock incorrectly scheduled reboot'}
-        'PASS real transient lock released during retry; cleanup returns 0 without reboot queue'
-    } finally {
-        if($transientStream){$transientStream.Dispose()}
-        if($cleanupProcess){if(!$cleanupProcess.HasExited){$cleanupProcess.Kill();$cleanupProcess.WaitForExit()};$cleanupProcess.Dispose()}
-    }
+ $root=Prepare 'locked'
+ $held=[IO.File]::Open((Join-Path $root 'modules/archive/7-zip.dll'),'Open','Read','None')
+ Run-Action $root 'Uninstall' 2
+ Run-Action $root 'Finalize' 2
+ Check (Test-Path -LiteralPath (Join-Path $root '.pctool-uninstalling')) 'Guard removed while extension remains'
+ Run-Action $root 'Uninstall' 2
+ Run-Action $root 'Finalize' 2
+ $store=Get-CleanupStore $namespace
+ $jobs=@(Get-ChildItem -LiteralPath $store -Directory)
+ Check ($jobs.Count -eq 1) 'Pending cleanup job missing'
+ $job=Get-Content -LiteralPath (Join-Path $jobs[0].FullName 'job.json') -Raw|ConvertFrom-Json
+ $scheduler=Open-CleanupScheduler $namespace
+ Wait-For {(Test-Path -LiteralPath (Join-Path $jobs[0].FullName 'last-result.txt')) -and $scheduler.Folder.GetTask($job.TaskName).State -ne 4} 'Worker did not complete pending attempt'
+ $held.Dispose();$held=$null
+ [void]$scheduler.Folder.GetTask($job.TaskName).Run($null)
+ Wait-For {!(Test-Path -LiteralPath $jobs[0].FullName)} 'Deferred cleanup did not finish after lock release'
+ Check (@(Get-ChildItem -LiteralPath $root -Force).Count -eq 1) 'Deferred cleanup left managed files'
+ Check (Test-Path -LiteralPath (Join-Path $root 'keep.txt')) 'Deferred cleanup removed unrelated file'
+ 'PASS locked extension returns 2, independent SYSTEM worker cleans without reboot and removes guard last'
+ Run-Action $root 'Uninstall' 0;Run-Action $root 'Finalize' 0
+ Check (!(Test-Path -LiteralPath (Join-Path $root '.pctool-uninstalling'))) 'Repeated completed uninstall created a permanent marker'
+ 'PASS repeated pending uninstall retains exact entries with one job; completed uninstall is idempotent'
 
-    foreach ($kind in @('file-lock', 'loaded-hive')) {
-        $directory = Prepare $kind
-        $file = "$directory/Data/test/SevenZip/settings.hiv"
-        $stream = $null; $hive = [IntPtr]::Zero
-        try {
-            if ($kind -eq 'file-lock') {
-                $stream = [IO.File]::Open($file, 'Create', 'ReadWrite', 'None')
-            } else {
-                $result = [UninstallHiveFixture]::RegLoadAppKey($file, [ref]$hive, 0xF003F, 0, 0)
-                if ($result) { throw "Cannot load fixture hive: $result" }
-            }
-            Run-Cleanup $directory 3010
-            $entries = @(Read-Pending)
-            $expectedPaths = @($file, "$directory/Data/test/SevenZip", "$directory/Data/test", "$directory/Data")
-            $previous = -1
-            foreach ($path in $expectedPaths) {
-                $native = '\??\' + [IO.Path]::GetFullPath($path)
-                $index = [Array]::IndexOf($entries, $native)
-                if ($index -lt 0 -or $index % 2 -or $index -le $previous -or $entries[$index+1] -ne '') { throw "Missing ordered delete operation for $path" }
-                $previous = $index
-            }
-            if (!(Test-Path "$directory/keep.txt") -or (Test-Path "$directory/Cache")) { throw 'Pending cleanup did not continue safely' }
-            "PASS $kind returns 3010 and queues file before parents with native NULL destination"
-        } finally {
-            if ($stream) { $stream.Dispose() }
-            if ($hive -ne [IntPtr]::Zero) { [UninstallHiveFixture]::RegCloseKey($hive) | Out-Null }
-            Remove-FixturePending
-        }
-        Run-Cleanup $directory 0
-        if (Test-Path "$directory/Data") { throw 'Cleanup after releasing lock failed' }
-    }
+ $root=Prepare 'upgrade'
+ $old=Join-Path $root 'modules/archive/7-zip.dll.123.old';[IO.File]::WriteAllText($old,'old mapped copy')
+ $held=[IO.File]::Open($old,'Open','Read','None')
+ Run-Action $root 'Install' 2
+ Check (!(Test-Path -LiteralPath (Join-Path $root '.pctool-uninstalling'))) 'Install did not release guard'
+ $previous=(Read-CleanupInstance $root).Id
+ $manifest=Join-Path $fixture 'upgrade-manifest.json'
+ Run-Action $root 'Record' 0 $manifest
+ Check ((Read-CleanupInstance $root).Id -ne $previous) 'Record reused previous installation identity'
+ Check (@(Get-ChildItem -LiteralPath (Get-CleanupStore $namespace) -Directory).Count -eq 0) 'Record did not cancel previous cleanup job'
+ Check (Test-Path -LiteralPath $old) 'Record deleted the previous mapped copy'
+ Run-Action $root 'Install' 2
+ $jobDirectory=@(Get-ChildItem -LiteralPath (Get-CleanupStore $namespace) -Directory)[0].FullName
+ $job=Get-Content -LiteralPath (Join-Path $jobDirectory 'job.json') -Raw|ConvertFrom-Json
+ Check ($job.Kind -eq 'upgrade' -and $job.Entries.Count -eq 1) 'Upgrade job includes non-old files'
+ $held.Dispose();$held=$null
+ $scheduler=Open-CleanupScheduler $namespace
+ Wait-For {!(Test-Path -LiteralPath $jobDirectory) -or $scheduler.Folder.GetTask($job.TaskName).State -ne 4} 'Upgrade worker stayed running'
+ if(Test-Path -LiteralPath $jobDirectory){[void]$scheduler.Folder.GetTask($job.TaskName).Run($null)}
+ Wait-For {!(Test-Path -LiteralPath $jobDirectory)} 'Upgrade cleanup did not finish'
+ Check (!(Test-Path -LiteralPath $old)) 'Old DLL survived upgrade cleanup'
+ Check ((Test-Path -LiteralPath (Join-Path $root 'PcTool.exe')) -and (Test-Path -LiteralPath (Join-Path $root 'modules/archive/7-zip.dll')) -and (Test-Path -LiteralPath (Join-Path $root '.pctool-install-instance.json'))) 'Upgrade cleanup touched active installation'
+ 'PASS Record cancels old jobs and changes instance; upgrade job removes only renamed old DLL'
 
-    $linked = Prepare 'junction'
-    $external = Join-Path $fixture 'external'
-    New-Item -ItemType Directory -Path $external -Force | Out-Null
-    [IO.File]::WriteAllText("$external/keep.txt", 'must not be traversed')
-    New-Item -ItemType Junction -Path "$linked/Cache/outside" -Target $external | Out-Null
-    Run-Cleanup $linked 0
-    if (!(Test-Path "$external/keep.txt") -or (Test-Path "$linked/Cache")) { throw 'Reparse-point protection failed' }
-    'PASS junction removed without traversing outside managed root'
-    "Evidence: $fixture"
-} finally {
-    try { Remove-FixturePending } finally { $queue.Dispose() }
+ $root=Prepare 'late-bootstrap-lock'
+ $held=[IO.File]::Open((Join-Path $root 'Uninstall.exe'),'Open','Read','None')
+ Run-Action $root 'Uninstall' 0
+ Inject-RegistrationFailure $root
+ Run-Action $root 'Finalize' 1
+ foreach($name in @('Uninstall.exe','.pctool-uninstalling','.pctool-install-instance.json')){Check (Test-Path -LiteralPath (Join-Path $root $name)) "Late bootstrap lock lost retry state: $name"}
+ Check (!(Test-Path -LiteralPath (Join-Path $root 'manage-data.ps1'))) 'Late-lock fixture did not exercise removed-bootstrap recovery'
+ $held.Dispose();$held=$null
+ # The real uninstaller embeds these scripts. Source fallback simulates that
+ # independent retry payload after the installed scripts were already removed.
+ Run-Action $root 'Uninstall' 0;Run-Action $root 'Finalize' 0
+ Check (@(Get-ChildItem -LiteralPath $root -Force).Count -eq 1) 'Late-lock retry left managed files'
+ 'PASS new bootstrap lock plus registration failure retains embedded uninstaller/state and can retry'
+
+ $root=Prepare 'registration-failure'
+ $held=[IO.File]::Open((Join-Path $root 'modules/archive/7-zip.dll'),'Open','Read','None')
+ Run-Action $root 'Uninstall' 2
+ Inject-RegistrationFailure $root
+ Run-Action $root 'Finalize' 1
+ foreach($name in @('manage-data.ps1','cleanup-jobs.ps1','retry-cleanup.ps1','PcToolUninstallHelper.exe','Uninstall.exe','.pctool-managed-files.json','.pctool-uninstalling','.pctool-install-instance.json')){
+  Check (Test-Path -LiteralPath (Join-Path $root $name)) "Registration failure removed retry tool: $name"
+ }
+ 'PASS task-registration failure preserves every retry tool and guard'
+ $held.Dispose();$held=$null
+ $queue=[Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SYSTEM\CurrentControlSet\Control\Session Manager')
+ try{$pending=@($queue.GetValue('PendingFileRenameOperations',[string[]]@()));Check (@($pending|Where-Object {$_ -like ('*'+$namespace+'*')}).Count -eq 0) 'Cleanup registered a reboot delete'}finally{$queue.Dispose()}
+ "Evidence: $fixture; isolated namespace: $namespace"
+}finally{
+ if($held){$held.Dispose()}
+ foreach($root in $roots){Stop-CleanupJobs $root $namespace}
+ $scheduler=Open-CleanupScheduler $namespace
+ if($scheduler){Check ($scheduler.Folder.GetTasks(1).Count -eq 0) 'Test tasks survived';$scheduler.Service.GetFolder('\').DeleteFolder($namespace,0)}
+ $store=Get-CleanupStore $namespace
+ if(Test-Path -LiteralPath $store){[IO.Directory]::Delete($store,$false);[IO.Directory]::Delete((Split-Path -Parent $store),$false)}
 }

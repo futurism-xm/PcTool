@@ -24,6 +24,8 @@ constexpr double kDisplayedRateDivisor = 8.0;
 
 constexpr UINT kMonitorCommandBase = 4100;
 constexpr UINT kTaskManagerCommand = 4200;
+constexpr UINT kPowerShellCommand = 4211;
+constexpr UINT kRemoteDesktopCommand = 4212;
 constexpr UINT kClipboardHistoryCommand = 4205;
 constexpr UINT kPaintCommand = 4206;
 constexpr UINT kArchiveCommand = 4207;
@@ -41,10 +43,11 @@ struct MenuItemInfo {
     const wchar_t* label;
 };
 
-constexpr std::array<MenuItemInfo, 5> kMenuItems{{
+constexpr std::array<MenuItemInfo, 6> kMenuItems{{
     {MonitorItem::UploadSpeed, L"上传速度"},
     {MonitorItem::DownloadSpeed, L"下载速度"},
     {MonitorItem::CpuUsage, L"CPU 利用率"},
+    {MonitorItem::GpuUsage, L"GPU 利用率"},
     {MonitorItem::MemoryUsage, L"内存利用率"},
     {MonitorItem::CpuFrequency, L"CPU 频率"},
 }};
@@ -137,7 +140,7 @@ bool TaskbarMonitorWindow::Create(HWND controller) {
 
     RecreateFont();
     TraceMonitor("create.sample.begin");
-    monitor_.Sample(settings_.IsItemVisible(MonitorItem::CpuFrequency));
+    monitor_.Sample(settings_.IsItemVisible(MonitorItem::CpuFrequency), settings_.IsItemVisible(MonitorItem::GpuUsage));
     TraceMonitor("create.sample.end");
     AdjustPosition(true);
     TraceMonitor("create.positioned");
@@ -147,6 +150,7 @@ bool TaskbarMonitorWindow::Create(HWND controller) {
 }
 
 void TaskbarMonitorWindow::Destroy() {
+    monitor_.SetGpuEnabled(false);
     TraceMonitor("destroy.begin");
     if (window_ && IsWindow(window_)) {
         KillTimer(window_, kSampleTimer);
@@ -267,7 +271,7 @@ LRESULT TaskbarMonitorWindow::HandleMessage(
     switch (message) {
     case WM_TIMER:
         if (wParam == kSampleTimer) {
-            monitor_.Sample(settings_.IsItemVisible(MonitorItem::CpuFrequency));
+            monitor_.Sample(settings_.IsItemVisible(MonitorItem::CpuFrequency), settings_.IsItemVisible(MonitorItem::GpuUsage));
             // Explorer can resize the task-button area when applications are
             // opened or closed. Only correct it when the geometry changed.
             AdjustPosition(false);
@@ -541,6 +545,8 @@ void TaskbarMonitorWindow::ShowContextMenu(POINT screenPoint) {
         kScreenshotCommand, MenuShortcutText(L"屏幕截图",hotkeys::Text(settings_.Hotkeys()[0]).c_str()).c_str());
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kTaskManagerCommand, MenuShortcutText(L"任务管理器",hotkeys::Text(settings_.Hotkeys()[5]).c_str()).c_str());
+    AppendMenuW(menu, MF_STRING, kRemoteDesktopCommand, MenuShortcutText(L"远程连接",hotkeys::Text(settings_.Hotkeys()[9]).c_str()).c_str());
+    AppendMenuW(menu, MF_STRING, kPowerShellCommand, L"PowerShell");
     AppendMenuW(menu, MF_STRING, kClipboardHistoryCommand, MenuShortcutText(L"剪切板历史",hotkeys::Text(settings_.Hotkeys()[1]).c_str()).c_str());
     AppendMenuW(menu, MF_STRING, kPaintCommand, MenuShortcutText(L"调用画图",hotkeys::Text(settings_.Hotkeys()[6]).c_str()).c_str());
     AppendMenuW(menu, MF_STRING, kArchiveCommand, MenuShortcutText(L"7-zip",hotkeys::Text(settings_.Hotkeys()[7]).c_str()).c_str());
@@ -681,7 +687,13 @@ void TaskbarMonitorWindow::HandleMenuCommand(UINT command) {
     if (command >= kMonitorCommandBase && command < kMonitorCommandBase + kMenuItems.size()) {
         const MonitorItem item = kMenuItems[command - kMonitorCommandBase].item;
         if (settings_.ToggleItem(item)) {
-            settings_.Save();
+            if (!settings_.Save()) {
+                settings_.ToggleItem(item);
+                MessageBoxW(controller_, L"保存性能监控项目设置失败。", L"PcTool",
+                    MB_OK | MB_ICONWARNING);
+                return;
+            }
+            monitor_.SetGpuEnabled(window_ && settings_.IsItemVisible(MonitorItem::GpuUsage));
             if(window_){AdjustPosition(true);InvalidateRect(window_, nullptr, TRUE);}
         }
         return;
@@ -716,6 +728,15 @@ void TaskbarMonitorWindow::HandleMenuCommand(UINT command) {
     if (command == kArchiveCommand) { PostMessageW(controller_, kOpenArchiveManagerMessage, 0, 0); return; }
     if (command == kClipboardHistoryCommand || command == kPaintCommand) {
         PostMessageW(controller_, command == kClipboardHistoryCommand ? kShowClipboardHistoryMessage : kLaunchPaintMessage, 0, 0);
+        return;
+    }
+    if (command == kPowerShellCommand) {
+        PostMessageW(controller_, kLaunchPowerShellMessage, 0, 0);
+        return;
+    }
+
+    if (command == kRemoteDesktopCommand) {
+        PostMessageW(controller_, kLaunchRemoteDesktopMessage, 0, 0);
         return;
     }
     if (command == kTaskManagerCommand) {
@@ -819,6 +840,8 @@ int TaskbarMonitorWindow::StableItemWidth(
         return measure(L"↓ 999.9 M/s");
     case MonitorItem::CpuUsage:
         return measure(L"CPU: 100%");
+    case MonitorItem::GpuUsage:
+        return measure(L"GPU: 100%");
     case MonitorItem::MemoryUsage:
         return measure(L"内存: 100%");
     case MonitorItem::CpuFrequency:
@@ -845,6 +868,10 @@ std::wstring TaskbarMonitorWindow::GetItemText(MonitorItem item) const {
     case MonitorItem::MemoryUsage:
         swprintf_s(text.data(), text.size(), L"内存: %lu%%",
             metrics.memoryUsagePercent);
+        break;
+    case MonitorItem::GpuUsage:
+        if (metrics.gpuUsagePercent < 0) return L"GPU: --%";
+        swprintf_s(text.data(), text.size(), L"GPU: %ld%%", std::lround(metrics.gpuUsagePercent));
         break;
     case MonitorItem::CpuFrequency:
         swprintf_s(text.data(), text.size(), L"CPU频率: %.2f GHz",

@@ -22,32 +22,49 @@ int Delta(uint32_t a,uint32_t b){return std::abs(Gray(a)-Gray(b));}
 // fixed navigation, or by an unrelated animated panel.
 std::vector<BandMotion> MatchVerticalBands(const Image& a,const Image& b,RECT bounds,int& ambiguousBands) {
     std::vector<BandMotion> bands;
+    struct ChangedRun{int top,bottom,weight,left,right;};
+    struct Sample{uint8_t previous,current,energy,samePosition;};
+    std::vector<ChangedRun> runs;
+    std::vector<Sample> sampled;
+    std::vector<std::pair<int,double>> scores;
     const int bandWidth=std::max<int>(8,(bounds.right-bounds.left)/64);
     for(int left=bounds.left;left<bounds.right;left+=bandWidth){
         const int right=std::min(int(bounds.right),left+bandWidth);
         // Disjoint changes in a footer/counter must not enlarge a small body
         // into one enormous motion band. Keep nearby text rows together, but
         // separate runs across a substantial unchanged vertical gap.
-        struct ChangedRun{int top,bottom,weight,left,right;};
-        std::vector<ChangedRun> runs;
+        runs.clear();
         for(int y=bounds.top;y<bounds.bottom;++y)for(int x=left;x<right;x+=std::max(1,bandWidth/4)){
             if(Delta(a.pixels[size_t(y)*a.width+x],b.pixels[size_t(y)*a.width+x])>10){
                 if(runs.empty()||y-runs.back().bottom>48)runs.push_back({y,y+1,0,right,left});
                 auto& run=runs.back();run.bottom=y+1;run.left=std::min(run.left,x);run.right=std::max(run.right,x+1);++run.weight;}
         }
+        if(std::none_of(runs.begin(),runs.end(),[](const ChangedRun& run){return run.weight>=16&&run.bottom-run.top>=24;}))continue;
+        // Every displacement revisits the same narrow set of scoring columns.
+        // Cache their exact integer luminance and texture once per band; keep
+        // the exhaustive displacement search and its sample order unchanged.
+        const int xStep=std::max(1,bandWidth/3),columns=(right-left+xStep-1)/xStep;
+        sampled.resize(size_t(bounds.bottom-bounds.top)*columns);
+        for(int y=bounds.top;y<bounds.bottom;++y)for(int column=0;column<columns;++column){
+            const int x=left+column*xStep;
+            const int previous=Gray(a.pixels[size_t(y)*a.width+x]),current=Gray(b.pixels[size_t(y)*b.width+x]);
+            const int next=Gray(b.pixels[size_t(std::min(y+1,int(bounds.bottom)-1))*b.width+x]);
+            sampled[size_t(y-bounds.top)*columns+column]={uint8_t(previous),uint8_t(current),uint8_t(std::abs(current-next)),uint8_t(std::abs(previous-current))};
+        }
         for(const auto& run:runs){const int top=run.top,bottom=run.bottom,weight=run.weight,changedLeft=run.left,changedRight=run.right;
         if(weight<16||bottom-top<24)continue;
-        int best=0;double bestError=256;std::vector<std::pair<int,double>> scores;
+        int best=0;double bestError=256;scores.clear();
         const int minimum=std::max(16,(bottom-top)/5),limit=bottom-top-minimum;
+        scores.reserve(size_t(limit)*2);
         for(int d=-limit;d<=limit;++d){
             if(!d)continue;double error=0;int samples=0;double texture=0;
             const int begin=top+std::max(0,-d),end=bottom-std::max(0,d);
-            for(int y=begin;y<end;y+=std::max(1,(end-begin)/64))for(int x=left;x<right;x+=std::max(1,bandWidth/3)){
-                const auto p=b.pixels[size_t(y)*b.width+x],q=a.pixels[size_t(y+d)*a.width+x];
-                const int energy=std::abs(Gray(p)-Gray(b.pixels[size_t(std::min(y+1,int(bounds.bottom)-1))*b.width+x]));
+            for(int y=begin;y<end;y+=std::max(1,(end-begin)/64))for(int column=0;column<columns;++column){
+                const auto& p=sampled[size_t(y-bounds.top)*columns+column];
+                const auto& q=sampled[size_t(y+d-bounds.top)*columns+column];
                 // White padding contributes neither artificial matches nor confidence.
-                if(energy<3&&Delta(a.pixels[size_t(y)*a.width+x],p)<3)continue;
-                error+=Delta(p,q);texture+=energy;++samples;
+                if(p.energy<3&&p.samePosition<3)continue;
+                error+=std::abs(int(p.current)-int(q.previous));texture+=p.energy;++samples;
             }
             const double score=samples>=12&&texture/samples>1?error/samples:256;
             scores.emplace_back(d,score);if(score<bestError){bestError=score;best=d;}
@@ -188,9 +205,13 @@ uint32_t SideColor(const Image& image,RECT side){
 }
 // Preserve continuous vertical boundaries. Non-uniform columns may contain
 // large icons as well as letters; extend the surrounding background instead.
-uint32_t Background(const Image& image,int x,RECT region,uint32_t fallback){
-    std::vector<int> red,green,blue;
-    for(int y=region.top;y<region.bottom;y+=std::max(1,int(region.bottom-region.top)/101)){auto p=image.pixels[size_t(y)*image.width+x];red.push_back((p>>16)&255);green.push_back((p>>8)&255);blue.push_back(p&255);}
+struct BackgroundSamples {std::vector<int> red,green,blue;};
+uint32_t Background(const Image& image,int x,RECT region,uint32_t fallback,BackgroundSamples& samples){
+    auto& red=samples.red;auto& green=samples.green;auto& blue=samples.blue;
+    red.clear();green.clear();blue.clear();
+    const int step=std::max(1,int(region.bottom-region.top)/101),count=(region.bottom-region.top+step-1)/step;
+    red.reserve(count);green.reserve(count);blue.reserve(count);
+    for(int y=region.top;y<region.bottom;y+=step){auto p=image.pixels[size_t(y)*image.width+x];red.push_back((p>>16)&255);green.push_back((p>>8)&255);blue.push_back(p&255);}
     auto median=[](std::vector<int>& c){auto mid=c.begin()+c.size()/2;std::nth_element(c.begin(),mid,c.end());return *mid;};
     const auto color=0xff000000|(median(red)<<16)|(median(green)<<8)|median(blue);
     int same=0,n=0;for(int y=region.top;y<region.bottom;y+=std::max(1,int(region.bottom-region.top)/101)){++n;if(Delta(color,image.pixels[size_t(y)*image.width+x])<6)++same;}
@@ -263,8 +284,13 @@ StitchResult ScrollStitcher::Push(const Image& frame,std::optional<POINT> anchor
     if(!locked_){
         region_=match.region;locked_=true;maxY_=viewportHeight_=bodyHeight;background_.resize(first_.width);
         if(region_.bottom<first_.height)footer_=first_.Crop(0,region_.bottom,first_.width,first_.height-region_.bottom);
-        const auto left=SideColor(first_,{0,region_.top,region_.left,region_.bottom}),right=SideColor(first_,{region_.right,region_.top,first_.width,region_.bottom});
-        for(int x=0;x<first_.width;++x)background_[x]=Background(first_,x,region_,x<region_.left?left:right);
+        // Only side columns use this extension. Full-width scrolling needs no
+        // background estimation, and partial scrolling reuses median scratch.
+        BackgroundSamples samples;
+        if(region_.left>0){const auto left=SideColor(first_,{0,region_.top,region_.left,region_.bottom});
+            for(int x=0;x<region_.left;++x)background_[x]=Background(first_,x,region_,left,samples);}
+        if(region_.right<first_.width){const auto right=SideColor(first_,{region_.right,region_.top,first_.width,region_.bottom});
+            for(int x=region_.right;x<first_.width;++x)background_[x]=Background(first_,x,region_,right,samples);}
     }
     // Save only genuinely new body intervals. Repeated visits move the current
     // viewport without growing the image or replacing previously captured rows.
@@ -280,23 +306,30 @@ StitchResult ScrollStitcher::Push(const Image& frame,std::optional<POINT> anchor
     currentY_=nextY;minY_=nextMin;maxY_=nextMax;previous_=frame;
     return result(accepted);
 }
-uint32_t ScrollStitcher::Pixel(int x,int y)const{
-    if(!locked_||y<region_.top)return first_.pixels[size_t(y)*first_.width+x];
+ScrollStitcher::Row ScrollStitcher::FindRow(int y)const{
+    if(!locked_||y<region_.top)return {first_.pixels.data()+size_t(y)*first_.width,nullptr};
     const int added=maxY_-minY_-viewportHeight_,footerTop=region_.bottom+added;
-    if(y>=footerTop)return footer_.pixels[size_t(y-footerTop)*first_.width+x];
-    if(x<region_.left||x>=region_.right)return y<region_.bottom?first_.pixels[size_t(y)*first_.width+x]:background_[x];
+    if(y>=footerTop)return {footer_.pixels.data()+size_t(y-footerTop)*first_.width,nullptr};
+    const auto* sides=y<region_.bottom?first_.pixels.data()+size_t(y)*first_.width:background_.data();
     const int bodyY=minY_+y-region_.top;
-    if(bodyY>=0&&bodyY<viewportHeight_)return first_.pixels[size_t(region_.top+bodyY)*first_.width+x];
+    if(bodyY>=0&&bodyY<viewportHeight_)return {sides,first_.pixels.data()+size_t(region_.top+bodyY)*first_.width+region_.left};
     const auto it=std::upper_bound(strips_.begin(),strips_.end(),bodyY,[](int yy,const Strip& strip){return yy<strip.begin;});
-    const auto& strip=*(it-1);return strip.image.pixels[size_t(bodyY-strip.begin)*strip.image.width+x-region_.left];
+    const auto& strip=*(it-1);return {sides,strip.image.pixels.data()+size_t(bodyY-strip.begin)*strip.image.width};
 }
 Image ScrollStitcher::Flatten()const{
     if(first_.Empty())return {};Image out(Width(),Height());
-    for(int y=0;y<out.height;++y)for(int x=0;x<out.width;++x)out.pixels[size_t(y)*out.width+x]=Pixel(x,y);return out;
+    for(int y=0;y<out.height;++y){const auto row=FindRow(y);auto* target=out.pixels.data()+size_t(y)*out.width;
+        if(!row.body)std::copy_n(row.sides,out.width,target);
+        else{std::copy_n(row.sides,region_.left,target);std::copy_n(row.body,region_.right-region_.left,target+region_.left);
+            std::copy_n(row.sides+region_.right,out.width-region_.right,target+region_.right);}
+    }return out;
 }
 Image ScrollStitcher::Preview(int maxWidth,int maxHeight)const{
     if(first_.Empty())return {};const double scale=std::min({1.0,double(maxWidth)/Width(),double(maxHeight)/Height()});Image out(std::max(1,int(Width()*scale)),std::max(1,int(Height()*scale)));
-    for(int y=0;y<out.height;++y)for(int x=0;x<out.width;++x)out.pixels[size_t(y)*out.width+x]=Pixel(std::min(Width()-1,int(x/scale)),std::min(Height()-1,int(y/scale)));return out;
+    std::vector<int> columns(out.width);for(int x=0;x<out.width;++x)columns[x]=std::min(Width()-1,int(x/scale));
+    for(int y=0;y<out.height;++y){const auto row=FindRow(std::min(Height()-1,int(y/scale)));auto* target=out.pixels.data()+size_t(y)*out.width;
+        for(int x=0;x<out.width;++x){const int source=columns[x];target[x]=row.body&&source>=region_.left&&source<region_.right?row.body[source-region_.left]:row.sides[source];}
+    }return out;
 }
 double ScrollStitcher::Difference(const Image& a,const Image& b,std::optional<POINT> anchor)const{
     if(a.Empty()||a.width!=b.width||a.height!=b.height)return 255;

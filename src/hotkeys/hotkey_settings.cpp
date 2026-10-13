@@ -6,10 +6,11 @@
 #include <windowsx.h>
 #include <gdiplus.h>
 namespace hotkeys { namespace {
-constexpr const wchar_t* Descriptions[]={L"框选屏幕，进行截图、标注或录屏",L"查看最近复制的文本内容",L"打开翻译窗口并输入文字",L"框选屏幕，通过文字识别提取并翻译",L"复制原应用中的选中文字并翻译",L"打开 Windows 任务管理器",L"打开系统画图工具",L"打开内置 7-Zip 文件管理器",L"查看和修改全局快捷键"};
+constexpr size_t kBindingCount=static_cast<size_t>(Action::Count);
+constexpr const wchar_t* Descriptions[]={L"框选屏幕，进行截图、标注或录屏",L"查看最近复制的文本内容",L"打开翻译窗口并输入文字",L"框选屏幕，通过文字识别提取并翻译",L"复制原应用中的选中文字并翻译",L"打开 Windows 任务管理器",L"打开系统画图工具",L"打开内置 7-Zip 文件管理器",L"查看和修改全局快捷键",L"打开 Windows 远程桌面连接"};
 void Round(Gdiplus::Graphics& g,RECT r,float radius,Gdiplus::Color fill,Gdiplus::Color line){Gdiplus::GraphicsPath p;capture::text_layout::AddRoundedRectangle(p,{float(r.left),float(r.top),float(r.right-r.left-1),float(r.bottom-r.top-1)},radius);Gdiplus::SolidBrush b(fill);g.FillPath(&b,&p);Gdiplus::Pen pen(line,1);g.DrawPath(&pen,&p);}
 struct Editor {
-    HWND window{},viewport{},fields[9]{},reset{},saveButton{};HFONT font{};UINT dpi{96};int offset{},page{},errorIndex{-1},wheel{};std::wstring error;Bindings initial,draft;Binding beforeFocus{};
+    HWND window{},viewport{},fields[kBindingCount]{},reset{},saveButton{};HFONT font{};UINT dpi{96};int offset{},page{},errorIndex{-1},wheel{};std::wstring error;Bindings initial,draft;Binding beforeFocus{};
     const std::function<bool(const Bindings&,std::wstring&)>& save;
     std::function<void(bool)> captureChanged;bool capturing{};
     shared_ui::SettingsFrame frame;shared_ui::SlimScrollbar scroll;
@@ -20,34 +21,34 @@ struct Editor {
     void Font(){if(font)DeleteObject(font);font=CreateFontW(-D(14),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,0,L"Microsoft YaHei UI");}
     void Set(size_t index,Binding binding){draft[index]=binding;error.clear();errorIndex=-1;SetWindowTextW(fields[index],Text(binding).c_str());InvalidateRect(fields[index],nullptr,FALSE);InvalidateRect(viewport,nullptr,FALSE);}
     void Fill(const Bindings& values){for(size_t i=0;i<values.size();++i)Set(i,values[i]);}
-    void Scroll(int value){const int next=std::clamp(value,0,std::max(0,D(9*88+16)-page));if(next==offset)return;offset=next;Layout();}
+    void Scroll(int value){const int next=std::clamp(value,0,std::max(0,D(int(kBindingCount)*88+16)-page));if(next==offset)return;offset=next;Layout();}
     void Layout(){if(!viewport)return;RECT c{};GetClientRect(window,&c);page=std::max(D(80),int(c.bottom)-D(138));
         const int bodyWidth=std::max(D(300),int(c.right)-D(48));
-        offset=std::clamp(offset,0,std::max(0,D(9*88+16)-page));const int x=D(102),width=std::max(D(160),bodyWidth-x-D(24));
+        offset=std::clamp(offset,0,std::max(0,D(int(kBindingCount)*88+16)-page));const int x=D(102),width=std::max(D(160),bodyWidth-x-D(24));
         // Never carry old child pixels into a neighbouring row during scrolling.
         // Position everything without painting, then repaint the whole clipped tree.
         auto move=[](HWND child,int x,int y,int width,int height){SetWindowPos(child,nullptr,x,y,width,height,SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOREDRAW|SWP_NOCOPYBITS);};
         move(viewport,D(24),D(58),bodyWidth,page);
-        for(size_t row=0;row<9;++row){
+        for(size_t row=0;row<kBindingCount;++row){
             const auto field=fields[DisplayOrder[row]];const int y=D(8+int(row)*88)-offset;
             move(field,x,y,width,D(36));
             // Don't leave a thin fragment of a binding at the viewport edge.
             // Keep it visible to keyboard navigation; focusing it scrolls it into view.
             SetWindowRgn(field,y>=0&&y+D(36)<=page?nullptr:CreateRectRgn(0,0,0,0),FALSE);
         }
-        scroll.Update(D(9*88+16),page,offset,dpi);move(scroll.Window(),c.right-D(13),D(58),D(6),page);
+        scroll.Update(D(int(kBindingCount)*88+16),page,offset,dpi);move(scroll.Window(),c.right-D(13),D(58),D(6),page);
         move(reset,c.right-D(262),c.bottom-D(57),D(134),D(36));move(saveButton,c.right-D(112),c.bottom-D(57),D(88),D(36));
         RedrawWindow(window,nullptr,nullptr,RDW_INVALIDATE|RDW_ALLCHILDREN|RDW_UPDATENOW);
     }
     void Paint(HWND target,HDC out,bool body){RECT c{};GetClientRect(target,&c);HDC dc=CreateCompatibleDC(out);auto bitmap=CreateCompatibleBitmap(out,std::max(1L,c.right),std::max(1L,c.bottom));auto old=SelectObject(dc,bitmap);HBRUSH brush=CreateSolidBrush(RGB(247,247,247));FillRect(dc,&c,brush);DeleteObject(brush);SelectObject(dc,font);SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(96,98,102));
-        if(body){for(size_t row=0;row<9;++row){auto index=DisplayOrder[row];int y=D(8+int(row)*88)-offset;if(y+D(84)<0||y>c.bottom)continue;RECT label{0,y,D(88),y+D(36)};if(label.top>=0&&label.bottom<=c.bottom)DrawTextW(dc,Names[index],-1,&label,DT_RIGHT|DT_VCENTER|DT_SINGLELINE);RECT desc{D(102),y+D(43),c.right-D(24),y+D(81)};SetTextColor(dc,errorIndex==int(index)?RGB(210,70,65):RGB(130,133,140));const auto* text=errorIndex==int(index)?error.c_str():Descriptions[index];if(desc.top>=0&&desc.bottom<=c.bottom)DrawTextW(dc,text,-1,&desc,DT_WORDBREAK);SetTextColor(dc,RGB(96,98,102));}}
+        if(body){for(size_t row=0;row<kBindingCount;++row){auto index=DisplayOrder[row];int y=D(8+int(row)*88)-offset;if(y+D(84)<0||y>c.bottom)continue;RECT label{0,y,D(88),y+D(36)};if(label.top>=0&&label.bottom<=c.bottom)DrawTextW(dc,Names[index],-1,&label,DT_RIGHT|DT_VCENTER|DT_SINGLELINE);RECT desc{D(102),y+D(43),c.right-D(24),y+D(81)};SetTextColor(dc,errorIndex==int(index)?RGB(210,70,65):RGB(130,133,140));const auto* text=errorIndex==int(index)?error.c_str():Descriptions[index];if(desc.top>=0&&desc.bottom<=c.bottom)DrawTextW(dc,text,-1,&desc,DT_WORDBREAK);SetTextColor(dc,RGB(96,98,102));}}
         else{RECT title{D(26),D(14),c.right-D(68),D(44)};DrawTextW(dc,L"快捷键管理",-1,&title,DT_LEFT|DT_VCENTER|DT_SINGLELINE);HPEN pen=CreatePen(PS_SOLID,1,RGB(226,228,232));auto oldPen=SelectObject(dc,pen);MoveToEx(dc,D(24),c.bottom-D(78),nullptr);LineTo(dc,c.right-D(24),c.bottom-D(78));SelectObject(dc,oldPen);DeleteObject(pen);}
         BitBlt(out,0,0,c.right,c.bottom,dc,0,0,SRCCOPY);SelectObject(dc,old);DeleteObject(bitmap);DeleteDC(dc);
     }
     bool Leave(){return draft==initial||shared_ui::ConfirmSourceAction(window,L"放弃未保存的修改？",L"快捷键尚未保存，关闭后将保留原来的绑定。",L"放弃修改");}
     void Submit(){errorIndex=-1;error.clear();for(size_t i=0;i<draft.size();++i){if(!Valid(draft[i])){errorIndex=int(i);error=L"请使用 Ctrl / Alt 组合键或功能键。";break;}if(Empty(draft[i]))continue;for(size_t j=0;j<i;++j)if(draft[i]==draft[j]){errorIndex=int(i);error=std::wstring(L"与“")+Names[j]+L"”重复，请修改。";break;}if(errorIndex>=0)break;}
         if(errorIndex<0&&!save(draft,error)){for(size_t i=0;i<draft.size();++i)if(error.find(Names[i])!=std::wstring::npos){errorIndex=int(i);break;}if(errorIndex<0)errorIndex=int(DisplayOrder[0]);}
-        if(errorIndex>=0){for(size_t row=0;row<9;++row)if(DisplayOrder[row]==size_t(errorIndex)){Scroll(D(int(row)*88));break;}SetFocus(fields[errorIndex]);InvalidateRect(viewport,nullptr,FALSE);return;}
+        if(errorIndex>=0){for(size_t row=0;row<kBindingCount;++row)if(DisplayOrder[row]==size_t(errorIndex)){Scroll(D(int(row)*88));break;}SetFocus(fields[errorIndex]);InvalidateRect(viewport,nullptr,FALSE);return;}
         initial=draft;SetFocus(window);CaptureKeys(false);InvalidateRect(viewport,nullptr,FALSE);
     }
     static LRESULT CALLBACK Field(HWND w,UINT m,WPARAM wp,LPARAM lp){auto* self=reinterpret_cast<Editor*>(GetWindowLongPtrW(w,GWLP_USERDATA));if(m==WM_NCCREATE){self=static_cast<Editor*>(reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams);SetWindowLongPtrW(w,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(self));}if(!self)return DefWindowProcW(w,m,wp,lp);const size_t index=GetDlgCtrlID(w)-300;

@@ -81,10 +81,23 @@ bool CopyText(HWND owner,const std::wstring& text) {
     CloseClipboard(); if(!ok) GlobalFree(memory); return ok;
 }
 bool SavePng(const Image& image,const std::wstring& path) {
+    if(path.empty() || image.width<=0 || image.height<=0 ||
+       uint64_t(image.width)*image.height!=image.pixels.size() || image.pixels.size()>kImageBudget/4) return false;
+    struct TemporaryFile {
+        std::wstring path; bool owned{};
+        ~TemporaryFile() { if(owned) DeleteFileW(path.c_str()); }
+    } temporary;
     try {
+        GUID id{}; check_hresult(CoCreateGuid(&id)); wchar_t suffix[40]{};
+        if(!StringFromGUID2(id,suffix,40)) return false;
+        temporary.path=(std::filesystem::path(path).parent_path()/(std::wstring(L".pctool-")+suffix+L".tmp")).wstring();
+        HANDLE file=CreateFileW(temporary.path.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);
+        if(file==INVALID_HANDLE_VALUE) return false;
+        temporary.owned=true; CloseHandle(file);
+        {
         auto factory=create_instance<IWICImagingFactory>(CLSID_WICImagingFactory);
         com_ptr<IWICStream> stream; check_hresult(factory->CreateStream(stream.put()));
-        check_hresult(stream->InitializeFromFilename(path.c_str(),GENERIC_WRITE));
+        check_hresult(stream->InitializeFromFilename(temporary.path.c_str(),GENERIC_WRITE));
         com_ptr<IWICBitmapEncoder> encoder;
         check_hresult(factory->CreateEncoder(GUID_ContainerFormatPng,nullptr,encoder.put()));
         check_hresult(encoder->Initialize(stream.get(),WICBitmapEncoderNoCache));
@@ -94,7 +107,21 @@ bool SavePng(const Image& image,const std::wstring& path) {
         check_hresult(frame->SetPixelFormat(&format));
         check_hresult(frame->WritePixels(image.height,image.width*4,UINT(image.pixels.size()*4),
             reinterpret_cast<BYTE*>(const_cast<uint32_t*>(image.pixels.data()))));
-        check_hresult(frame->Commit()); check_hresult(encoder->Commit()); return true;
+        check_hresult(frame->Commit()); check_hresult(encoder->Commit());
+        }
+        // Release WIC's file handle before publishing. Failed encoding or
+        // replacement must leave an existing user-selected destination intact.
+        const DWORD attributes=GetFileAttributesW(path.c_str());
+        if(attributes!=INVALID_FILE_ATTRIBUTES) {
+            // Preserve the replaced file's explicit ACL and other metadata.
+            if(!ReplaceFileW(path.c_str(),temporary.path.c_str(),nullptr,0,nullptr,nullptr)) return false;
+        } else {
+            const DWORD error=GetLastError();
+            if(error!=ERROR_FILE_NOT_FOUND && error!=ERROR_PATH_NOT_FOUND) return false;
+            // A newly appearing destination belongs to another writer.
+            if(!MoveFileExW(temporary.path.c_str(),path.c_str(),MOVEFILE_WRITE_THROUGH)) return false;
+        }
+        temporary.owned=false; return true;
     } catch(...) { return false; }
 }
 std::wstring ChoosePath(HWND owner,bool video) {
