@@ -10,7 +10,7 @@ if(MSVC)
     set_property(TARGET PcToolUninstallHelper PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
-add_executable(PcToolStorageTests tests/storage_tests.cpp src/app/app_settings.cpp)
+add_executable(PcToolStorageTests tests/storage_tests.cpp src/app/app_settings.cpp src/app/startup_registration.cpp)
 add_executable(PcToolArchiveStorageTests tests/archive_storage_tests.cpp)
 target_compile_features(PcToolArchiveStorageTests PRIVATE cxx_std_17)
 target_compile_definitions(PcToolArchiveStorageTests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
@@ -18,7 +18,7 @@ target_link_libraries(PcToolArchiveStorageTests PRIVATE Advapi32 User32)
 target_include_directories(PcToolStorageTests PRIVATE src)
 target_compile_features(PcToolStorageTests PRIVATE cxx_std_17)
 target_compile_definitions(PcToolStorageTests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_link_libraries(PcToolStorageTests PRIVATE Advapi32 Ole32 Shell32 User32)
+target_link_libraries(PcToolStorageTests PRIVATE Advapi32 Ole32 Oleaut32 Taskschd Shell32 User32)
 if(MSVC)
     target_compile_options(PcToolStorageTests PRIVATE /utf-8 /EHsc)
 endif()
@@ -65,6 +65,8 @@ target_link_libraries(PcTool PRIVATE
     Crypt32
     Uxtheme
     Advapi32
+    Oleaut32
+    Taskschd
     Comctl32
     Dwmapi
     Gdiplus
@@ -111,6 +113,14 @@ set_property(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" PROPERTY VS_STARTUP_PROJECT
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(PcToolStartupTests tests/startup_registration_tests.cpp src/app/startup_registration.cpp)
+    target_include_directories(PcToolStartupTests PRIVATE src)
+    target_compile_features(PcToolStartupTests PRIVATE cxx_std_17)
+    target_compile_definitions(PcToolStartupTests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_link_libraries(PcToolStartupTests PRIVATE Advapi32 Ole32 Oleaut32 Taskschd Shell32 User32)
+    if(MSVC)
+        target_compile_options(PcToolStartupTests PRIVATE /W4 /utf-8 /EHsc)
+    endif()
     add_test(NAME storage_cache_references COMMAND PcToolStorageTests --core)
     add_executable(PcToolGpuMonitorTests tests/gpu_monitor_tests.cpp)
     target_include_directories(PcToolGpuMonitorTests PRIVATE src)
@@ -173,7 +183,7 @@ if(BUILD_TESTING)
     endif()
     target_link_libraries(PcToolScrollAnnotationTests PRIVATE gdiplus gdi32 user32 msimg32)
     add_test(NAME capture_scroll_annotations COMMAND PcToolScrollAnnotationTests)
-    add_executable(PcToolTaskbarTests tests/taskbar_layout_tests.cpp src/monitor/taskbar_monitor_window.cpp src/app/app_settings.cpp src/monitor/system_monitor.cpp)
+    add_executable(PcToolTaskbarTests tests/taskbar_layout_tests.cpp src/monitor/taskbar_monitor_window.cpp src/app/app_settings.cpp src/app/startup_registration.cpp src/monitor/system_monitor.cpp)
     target_include_directories(PcToolTaskbarTests PRIVATE src)
     target_compile_features(PcToolTaskbarTests PRIVATE cxx_std_17)
     get_target_property(PCTOOL_TEST_DEFINITIONS PcTool COMPILE_DEFINITIONS)
@@ -236,7 +246,7 @@ if(BUILD_TESTING)
         src/long_capture/long_capture_session.cpp src/app/capture_tools.cpp src/ocr/ocr_layout.cpp src/ocr/ocr_window.cpp src/ocr/ocr_service.cpp src/ocr/paddle_ocr.cpp src/recording/screen_recorder.cpp src/recording/gif_recording.cpp src/recording/gif_preview.cpp
         src/shared/annotation/annotation_style.cpp
     src/shared/ui/toolbar_icons.cpp src/recording/recording_session.cpp src/recording/recording_preview.cpp src/shared/annotation/annotation_painter.cpp src/shared/annotation/annotation_renderer.cpp
-        src/shared/ui/popup_controls.cpp src/capture/image_editor.cpp src/capture/screenshot_overlay.cpp src/app/app.rc)
+        src/shared/ui/popup_controls.cpp src/capture/image_editor.cpp src/capture/screenshot_overlay.cpp tests/app.rc)
     set_property(SOURCE tests/capture_integration.cpp tests/scroll_session_performance.cpp tests/screenshot_interaction_tests.cpp tests/ocr_comparison.cpp APPEND PROPERTY OBJECT_DEPENDS "${PCTOOL_ABSOLUTE_HEADERS}")
     target_include_directories(PcToolCaptureIntegration PRIVATE src src/app)
     target_compile_features(PcToolCaptureIntegration PRIVATE cxx_std_17)
@@ -291,8 +301,12 @@ if(BUILD_TESTING)
     # Interactive desktop/audio integration is opt-in; core tests work unattended.
     option(PCTOOL_ENABLE_DESKTOP_TESTS "Enable tests requiring an interactive desktop, Chinese OCR and audio devices" OFF)
     if(PCTOOL_ENABLE_DESKTOP_TESTS)
+        add_test(NAME startup_registration COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tests/startup_registration_tests.ps1" -Executable "$<TARGET_FILE:PcToolStartupTests>")
+        set_tests_properties(startup_registration PROPERTIES RUN_SERIAL TRUE TIMEOUT 60 LABELS desktop)
         add_test(NAME translation_selection_helpers COMMAND PcToolTranslationTests selection-helpers)
         set_tests_properties(translation_selection_helpers PROPERTIES RUN_SERIAL TRUE TIMEOUT 40 LABELS desktop)
+        add_test(NAME translation_selection_staged COMMAND PcToolTranslationTests selection-staged)
+        set_tests_properties(translation_selection_staged PROPERTIES RUN_SERIAL TRUE TIMEOUT 45 LABELS desktop)
         add_test(NAME capture_memory COMMAND PcToolCaptureIntegration memory-test enforce)
         set_tests_properties(capture_memory PROPERTIES RUN_SERIAL TRUE TIMEOUT 120 LABELS desktop)
         add_test(NAME ocr_local_comparison COMMAND PcToolCaptureIntegration ocr-compare "${CMAKE_CURRENT_BINARY_DIR}/ocr-comparison")
@@ -343,11 +357,12 @@ if(BUILD_TESTING)
     add_executable(PcToolTranslationTests tests/translation_tests.cpp tests/translation_source_tests.cpp
         ${PCTOOL_TRANSLATION_SOURCES} ${PCTOOL_SHARED_SOURCES}
         src/ocr/paddle_ocr.cpp src/ocr/ocr_layout.cpp
-        src/clipboard/clipboard_history.cpp src/app/app.rc
-        src/monitor/taskbar_monitor_window.cpp src/monitor/system_monitor.cpp src/app/app_settings.cpp)
+        src/clipboard/clipboard_history.cpp tests/app.rc
+        src/monitor/taskbar_monitor_window.cpp src/monitor/system_monitor.cpp src/app/app_settings.cpp src/app/startup_registration.cpp)
     target_include_directories(PcToolTranslationTests PRIVATE src src/app third_party/ocr/include)
     target_compile_features(PcToolTranslationTests PRIVATE cxx_std_17)
     target_compile_definitions(PcToolTranslationTests PRIVATE ${PCTOOL_DEFINITIONS})
+    set_property(SOURCE tests/app.rc APPEND PROPERTY OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/app.manifest")
     target_link_libraries(PcToolTranslationTests PRIVATE ${PCTOOL_LIBRARIES} Ws2_32)
     if(MSVC)
         target_compile_options(PcToolTranslationTests PRIVATE /W4 /utf-8 /EHsc)

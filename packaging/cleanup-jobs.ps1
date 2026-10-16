@@ -1,4 +1,9 @@
 # Shared by the elevated installer and its isolated, temporary SYSTEM tasks.
+if ($PSVersionTable.PSEdition -eq 'Desktop') {
+ # A PowerShell 7 parent can pass Core module paths to Windows PowerShell.
+ # Load its own ACL cmdlets explicitly instead of inheriting that lookup order.
+ Import-Module (Join-Path $PSHOME 'Modules/Microsoft.PowerShell.Security/Microsoft.PowerShell.Security.psd1') -ErrorAction Stop
+}
 # Callers of installer operations hold Get-CleanupLockName across the transaction.
 Set-StrictMode -Version 2
 function Test-CleanupNamespace([string]$Namespace) {

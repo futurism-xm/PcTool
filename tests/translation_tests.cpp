@@ -2,6 +2,7 @@
 #include "translation/clipboard_source.h"
 #include "translation/translation_capture.h"
 #include "translation/translation_view.h"
+#include "translation/source_menu_probe.h"
 #include "shared/ui/capture_ui.h"
 #include "shared/platform/capture_platform.h"
 #include "clipboard/clipboard_history.h"
@@ -9,6 +10,7 @@
 #include "app/app_messages.h"
 #include <filesystem>
 #include <objbase.h>
+#include <sddl.h>
 #include <iostream>
 #include <fstream>
 #include <stdexcept>
@@ -90,7 +92,7 @@ void BrowserCase(HWND host,HWND popup,HWND edit,const std::filesystem::path& out
     ULONGLONG maximum{};
     for(int i=0;i<10;++i){
         const auto sequence=GetClipboardSequenceNumber();const auto begin=GetTickCount64();AltE();
-        Require(Until([&]{return IsWindowVisible(popup)&&GetClipboardSequenceNumber()!=sequence&&Status(popup)==L"识别内容为空";},450),"browser blank hotkey did not show immediately");
+        Require(Until([&]{return IsWindowVisible(popup)&&GetClipboardSequenceNumber()!=sequence&&Status(popup)==L"正在复制所选文字…";},450),"browser blank hotkey did not show immediately");
         maximum=std::max(maximum,GetTickCount64()-begin);Require(capture::WindowText(edit).empty(),"browser blank reused text");
         RECT r{};GetWindowRect(popup,&r);HWND top=WindowFromPoint({(r.left+r.right)/2,(r.top+r.bottom)/2});Require(GetAncestor(top,GA_ROOT)==popup,"browser blank popup occluded");
         Pump(80);Require(IsWindowVisible(popup),"browser blank popup disappeared");
@@ -127,7 +129,7 @@ void HelperSelectionCase(){
     STARTUPINFOW startup{sizeof(startup)};PROCESS_INFORMATION process{};
     Require(CreateProcessW(exe,command.data(),nullptr,nullptr,FALSE,0,nullptr,nullptr,&startup,&process)!=FALSE,"start multiprocess copy source");CloseHandle(process.hThread);
     struct Cleanup{HANDLE process;HWND window{};~Cleanup(){if(window)PostMessageW(window,WM_CLOSE,0,0);WaitForSingleObject(process,2000);CloseHandle(process);}} cleanup{process.hProcess};
-    HWND target{};Require(Until([&]{target=FindWindowW(L"PcTool.TranslationCopyTarget",nullptr);return target && GetPropW(target,L"HelperCopyWindow");},5000),"helper source not ready");cleanup.window=target;
+    HWND target{};Require(Until([&]{target=FindWindowW(L"PcTool.TranslationCopyTarget",nullptr);return target&&GetPropW(target,L"CopyFixtureReady")&&GetPropW(target,L"HelperCopyWindow");},5000),"helper source not ready");cleanup.window=target;
     HWND helper=static_cast<HWND>(GetPropW(target,L"HelperCopyWindow"));DWORD helperPid{};GetWindowThreadProcessId(helper,&helperPid);
     translation::ClipboardSource identity;Require(identity.Begin(process.dwProcessId),"bind source identity");
     Require(identity.Accepts(process.dwProcessId)&&identity.Accepts(helperPid),"same process or descendant rejected");
@@ -160,6 +162,129 @@ void HelperSelectionCase(){
     Require(!identity.Accepts(process.dwProcessId)&&!identity.Accepts(helperPid),"closed source accepted");
     cleanup.window=nullptr;identity.Reset();Require(!identity.Accepts(helperPid),"cancelled request accepted");
     std::cout<<"PASS 12 multiprocess and 12 ownerless selections, stale clipboard ignored, immediate popup, complete text, exactly one submission, foreign writer rejection, late ownerless edit protection and source exit\n";
+}
+void StagedSelectionCase(bool medium=false){
+    wchar_t exe[32768]{};GetModuleFileNameW(nullptr,exe,32768);
+    auto command=L"\""+std::wstring(exe)+L"\" --copy-target";
+    STARTUPINFOW startup{sizeof(startup)};PROCESS_INFORMATION process{};
+    if(medium){
+        HANDLE token{},restricted{};Require(OpenProcessToken(GetCurrentProcess(),TOKEN_DUPLICATE|TOKEN_QUERY|TOKEN_ASSIGN_PRIMARY|TOKEN_ADJUST_DEFAULT,&token)!=FALSE,"query elevated test token");
+        BYTE admin[SECURITY_MAX_SID_SIZE]{};DWORD adminSize=sizeof(admin);Require(CreateWellKnownSid(WinBuiltinAdministratorsSid,nullptr,admin,&adminSize)!=FALSE,"admin group fixture");
+        SID_AND_ATTRIBUTES disabled{admin,0};const bool created=CreateRestrictedToken(token,DISABLE_MAX_PRIVILEGE,1,&disabled,0,nullptr,0,nullptr,&restricted)!=FALSE;CloseHandle(token);Require(created,"create ordinary-user source token");
+        PSID label{};Require(ConvertStringSidToSidW(L"S-1-16-8192",&label)!=FALSE,"medium source label");TOKEN_MANDATORY_LABEL integrity{{label,SE_GROUP_INTEGRITY}};
+        const bool lowered=SetTokenInformation(restricted,TokenIntegrityLevel,&integrity,DWORD(sizeof(integrity)+GetLengthSid(label)))!=FALSE;LocalFree(label);
+        bool launched=lowered&&CreateProcessWithTokenW(restricted,0,exe,command.data(),0,nullptr,nullptr,&startup,&process);
+        if(!launched&&lowered){command=L"\""+std::wstring(exe)+L"\" --copy-target";launched=CreateProcessAsUserW(restricted,exe,command.data(),nullptr,nullptr,FALSE,0,nullptr,nullptr,&startup,&process)!=FALSE;}
+        const DWORD launchError=launched?0:GetLastError();CloseHandle(restricted);if(!launched)std::cout<<"medium source launch Win32="<<launchError<<" lowered="<<lowered<<"\n";Require(launched,"launch medium-integrity copy source");
+        HANDLE sourceToken{};Require(OpenProcessToken(process.hProcess,TOKEN_QUERY,&sourceToken)!=FALSE,"read actual source token");DWORD bytes{};GetTokenInformation(sourceToken,TokenIntegrityLevel,nullptr,0,&bytes);std::vector<BYTE> data(bytes);Require(GetTokenInformation(sourceToken,TokenIntegrityLevel,data.data(),bytes,&bytes)!=FALSE,"read actual source integrity");CloseHandle(sourceToken);
+        auto sid=reinterpret_cast<TOKEN_MANDATORY_LABEL*>(data.data())->Label.Sid;Require(*GetSidSubAuthority(sid,*GetSidSubAuthorityCount(sid)-1)==8192,"source did not run at medium integrity");
+    }else Require(CreateProcessW(exe,command.data(),nullptr,nullptr,FALSE,0,nullptr,nullptr,&startup,&process)!=FALSE,"start staged copy source");
+    CloseHandle(process.hThread);
+    struct Cleanup{HANDLE process;HWND window{};~Cleanup(){if(window)PostMessageW(window,WM_CLOSE,0,0);WaitForSingleObject(process,2000);CloseHandle(process);}} cleanup{process.hProcess};
+    HWND target{};Require(Until([&]{target=FindWindowW(L"PcTool.TranslationCopyTarget",nullptr);return target&&GetPropW(target,L"CopyFixtureReady");},5000),"staged source not ready");cleanup.window=target;
+    translation::TranslationController controller;auto provider=std::make_shared<CountingProvider>();controller.SetProviders({provider});
+    HWND host=Host(L"PcTool.StagedSelectionTest");controller.Configure(host,true,[]{return true;},false);
+    for(int stage=1;stage<=3;++stage){
+        SendMessageW(GetDlgItem(target,101),WM_APP+5,stage,0);
+        ActivateSource(target);SendMessageW(target,WM_APP+1,0,0);
+        Require(capture::CopyText(host,L"stale clipboard must not be translated"),"seed staged clipboard");
+        const int before=provider->calls;controller.HandleHotkey(translation::SelectionHotkey);
+        HWND pendingPopup=OwnWindow(L"PcTool.Translation");
+        Require(IsWindowVisible(pendingPopup)&&Status(pendingPopup)==L"正在复制所选文字…","copy was reported empty before completion");
+        if(stage==3)Require(RemoveClipboardFormatListener(pendingPopup)!=FALSE,"disable notifications to test polling fallback");
+        const bool submitted=Until([&]{return provider->calls==before+1;});
+        if(!submitted){const auto status=Status(pendingPopup);std::string text(status.size()*4,'\0');text.resize(WideCharToMultiByte(CP_UTF8,0,status.c_str(),int(status.size()),text.data(),int(text.size()),nullptr,nullptr));DWORD a{},b{};auto edit=GetDlgItem(target,101);SendMessageW(edit,EM_GETSEL,reinterpret_cast<WPARAM>(&a),reinterpret_cast<LPARAM>(&b));std::cerr<<"Staged failure stage="<<stage<<" status="<<text<<" foreground="<<GetForegroundWindow()<<" target="<<target<<" key="<<GetPropW(edit,L"CopyKeySeen")<<" char="<<GetPropW(edit,L"CopyCharSeen")<<" timer="<<GetPropW(edit,L"CopyTimerSeen")<<" selection="<<a<<","<<b<<"\n";}
+        Require(submitted,"staged clipboard text not submitted");
+        HWND popup=OwnWindow(L"PcTool.Translation");
+        Require(provider->last==L"中文取词 English 123\r\nsecond line"&&Status(popup).empty(),"staged copy text incomplete or false empty warning");
+        Pump(220);Require(provider->calls==before+1,"staged copy submitted twice");
+    }
+    HWND popup=OwnWindow(L"PcTool.Translation"),edit=Child(popup,1101);
+    for(int stage:{4,5,6,7}){
+        SendMessageW(GetDlgItem(target,101),WM_APP+5,stage,0);
+        ActivateSource(target);SendMessageW(target,WM_APP+1,0,0);
+        const int before=provider->calls;controller.HandleHotkey(translation::SelectionHotkey);
+        Require(Status(popup)==L"正在复制所选文字…","missing copy progress");
+        Require(Until([&]{return Status(popup)!=L"正在复制所选文字…";},2400),"copy never timed out");
+        Require(provider->calls==before&&capture::WindowText(edit).empty(),"empty or timed out copy was submitted");
+        Require(stage==5?Status(popup).find(L"无法读取剪贴板")!=std::wstring::npos:Status(popup)==L"识别内容为空","wrong copy timeout feedback");
+        SetWindowTextW(edit,L"user input after timeout");Pump(550);
+        Require(capture::WindowText(edit)==L"user input after timeout"&&provider->calls==before,"late clipboard overwrote user input after timeout");
+    }
+    SendMessageW(GetDlgItem(target,101),WM_APP+5,3,0);
+    ActivateSource(target);SendMessageW(target,WM_APP+1,0,0);
+    const int before=provider->calls;controller.HandleHotkey(translation::SelectionHotkey);
+    Require(Until([&]{return GetClipboardOwner()==target||GetClipboardOwner()==GetDlgItem(target,101);}),"wait for intermediate source clipboard");
+    SetWindowTextW(edit,L"user edit during staged copy");Pump(350);
+    Require(capture::WindowText(edit)==L"user edit during staged copy"&&provider->calls==before,"staged copy overwrote user edit");
+    ActivateSource(target);SendMessageW(target,WM_APP+1,0,0);
+    INPUT modifier{};modifier.type=INPUT_KEYBOARD;modifier.ki.wVk=VK_SHIFT;
+    Require(SendInput(1,&modifier,sizeof(INPUT))==1,"hold modifier fixture");
+    struct ReleaseModifier{~ReleaseModifier(){INPUT key{};key.type=INPUT_KEYBOARD;key.ki.wVk=VK_SHIFT;key.ki.dwFlags=KEYEVENTF_KEYUP;SendInput(1,&key,sizeof(INPUT));}} releaseModifier;
+    controller.HandleHotkey(translation::SelectionHotkey);
+    Require(Until([&]{return Status(popup).find(L"请松开")!=std::wstring::npos;}),"held modifier never timed out");
+    Require(capture::WindowText(edit).empty()&&provider->calls==before,"held modifier copied text");
+    controller.Shutdown();DestroyWindow(host);
+    std::cout<<"PASS staged clipboard, progress, empty/no-response/blocked/late timeouts and user edit cancellation\n";
+    if(medium)std::cout<<"PASS elevated controller copies from restricted medium-integrity source\n";
+}
+void ExternalSelectionCase(HWND source){
+    Require(IsWindow(source)!=FALSE,"external fixture window unavailable");
+    translation::TranslationController controller;auto provider=std::make_shared<CountingProvider>();controller.SetProviders({provider});
+    HWND host=Host(L"PcTool.ExternalSelectionTest");service=&controller;
+    const bool defaultAvailable=RegisterHotKey(host,901,MOD_ALT|MOD_NOREPEAT,'E')!=FALSE;
+    if(defaultAvailable)UnregisterHotKey(host,901);
+    Require(defaultAvailable,"Alt+E is occupied; exact-key Visual Studio acceptance is BLOCKED (no substitute key)");
+    const WORD trigger='E';
+    std::cout<<"External editor hotkey: actual Alt+E\n";
+    auto bindings=hotkeys::Defaults;bindings[2]={MOD_ALT,VK_F20};bindings[3]={MOD_ALT,VK_F21};bindings[4]={MOD_ALT,trigger};
+    controller.Configure(host,true,[]{return true;},false,bindings);
+    SetWindowPos(source,HWND_TOPMOST,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_SHOWWINDOW);SetForegroundWindow(source);Pump(200);
+    SetWindowPos(source,HWND_NOTOPMOST,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);
+    Require(GetForegroundWindow()==source,"external source foreground unavailable");
+    std::vector<ULONGLONG> timings;int failures=0;
+    auto key=[](WORD vk,bool up=false){INPUT e{};e.type=INPUT_KEYBOARD;e.ki.wVk=vk;e.ki.dwFlags=up?KEYEVENTF_KEYUP:0;Require(SendInput(1,&e,sizeof(e))==1,"external keyboard injection");};
+    for(int trial=0;trial<39;++trial){
+        if(trial){SetForegroundWindow(source);Pump(80);key(VK_ESCAPE);Pump(40);key(VK_CONTROL);key('A');key('A',true);key(VK_CONTROL,true);Pump(80);}
+        Require(GetForegroundWindow()==source,"external source lost foreground");
+        const int before=provider->calls;
+        if(trial>=33){
+            INPUT rapid[4]{};for(auto& e:rapid)e.type=INPUT_KEYBOARD;
+            rapid[0].ki.wVk=VK_MENU;rapid[1].ki.wVk=trigger;
+            rapid[2].ki.wVk=trial%2?VK_MENU:trigger;rapid[3].ki.wVk=trial%2?trigger:VK_MENU;
+            rapid[2].ki.dwFlags=rapid[3].ki.dwFlags=KEYEVENTF_KEYUP;
+            Require(SendInput(4,rapid,sizeof(INPUT))==4,"rapid actual Alt+E");
+        }else{
+            key(VK_MENU);Pump(40);key(trigger);Pump(trial%3==2?180:40);
+            if(trial%3==1){key(VK_MENU,true);Pump(40);key(trigger,true);}
+            else {key(trigger,true);Pump(40);key(VK_MENU,true);}
+        }
+        const auto released=GetTickCount64();
+        const bool copied=Until([&]{return provider->calls>before;},4000);HWND popup=OwnWindow(L"PcTool.Translation");
+        if(!copied){++failures;std::cout<<"FAIL external selection trial "<<trial<<" popup="<<bool(popup)<<" status-length="<<(popup?Status(popup).size():0)<<"\n";continue;}
+        Require(provider->calls==before+1&&provider->last==L"// PcTool selection fixture\r\n// 中文取词 English 123","external selection wrong or incomplete text");
+        Require(Status(popup).empty(),"external selection kept warning");
+        const auto elapsed=GetTickCount64()-released;if(trial>=3&&trial<33)timings.push_back(elapsed);
+        std::cout<<"PASS external editor selection trial "<<trial<<" release-to-submit-ms="<<elapsed<<"\n";
+    }
+    std::sort(timings.begin(),timings.end());
+    std::cout<<"METRICS exact-Alt+E attempts=39 failures="<<failures<<" measured="<<timings.size();
+    if(!timings.empty())std::cout<<" median-ms="<<timings[timings.size()/2]<<" p95-ms="<<timings[(timings.size()*95-1)/100];
+    std::cout<<"\n";
+    if(!failures)for(int trial=0;trial<3;++trial){
+        const auto popup=OwnWindow(L"PcTool.Translation");Require(GetForegroundWindow()==popup,"repeat must originate from translation popup");
+        const auto before=provider->calls;key(VK_MENU);Pump(40);key(trigger);Pump(40);key(trigger,true);key(VK_MENU,true);
+        Require(Until([&]{return provider->calls==before+1;}),"repeat from popup failed");Require(provider->last==L"// PcTool selection fixture\r\n// 中文取词 English 123","repeat text mismatch");
+    }
+    if(!failures){
+        SetForegroundWindow(source);Pump(80);key(VK_MENU);Pump(60);key(VK_MENU,true);Pump(80);
+        DWORD pid{};GetWindowThreadProcessId(source,&pid);auto menu=translation::ProbeSourceMenu(pid);
+        Require(Until([&]{return menu.wait_for(std::chrono::seconds(0))==std::future_status::ready;}),"plain Alt menu probe timed out");
+        const auto state=menu.get();Require(state.available&&state.menu,"ordinary Alt no longer opens VS menu");key(VK_ESCAPE);Pump(80);
+        std::cout<<"PASS 6 rapid release chords, 3 repeats from popup and ordinary Alt menu activation\n";
+    }
+    controller.Shutdown();DestroyWindow(host);service=nullptr;
+    Require(!failures,"actual Alt+E selection failures");
 }
 void NotepadPlusCase(const std::filesystem::path& output,const std::filesystem::path& executable){
     Require(std::filesystem::exists(executable),"Notepad++ executable unavailable");
@@ -290,7 +415,25 @@ int wmain(int argc,wchar_t** argv){
         SetForegroundWindow(host);SetFocus(edit);SendMessageW(edit,EM_SETSEL,0,-1);
         SetWindowSubclass(edit,[](HWND w,UINT m,WPARAM wp,LPARAM lp,UINT_PTR,DWORD_PTR)->LRESULT{
             HWND helper=static_cast<HWND>(GetPropW(GetParent(w),L"HelperCopyWindow"));
-            if(helper&&((m==WM_COPY)||(m==WM_KEYDOWN&&wp=='C'&&(GetKeyState(VK_CONTROL)&0x8000)))){
+            if(m==WM_APP+5){SetPropW(w,L"StagedCopyFixture",reinterpret_cast<HANDLE>(wp));return 0;}
+            const bool copyKey=m==WM_KEYDOWN&&wp=='C'&&(GetKeyState(VK_CONTROL)&0x8000);
+            if(copyKey)SetPropW(w,L"CopyKeySeen",reinterpret_cast<HANDLE>(1));
+            if(copyKey&&(helper||GetPropW(w,L"StagedCopyFixture")||GetPropW(w,L"DelayedCopyFixture")||GetPropW(w,L"CopyImageFixture")))return 0;
+            if(m==WM_CHAR&&wp==3){
+                SetPropW(w,L"CopyCharSeen",reinterpret_cast<HANDLE>(1));
+                const auto stage=reinterpret_cast<UINT_PTR>(GetPropW(w,L"StagedCopyFixture"));
+                if(stage){
+                    if(stage==6)return 0;
+                    if(stage==5){if(OpenClipboard(w)){EmptyClipboard();SetTimer(w,906,1800,nullptr);}return 0;}
+                    if(stage==1){if(OpenClipboard(w)){EmptyClipboard();CloseClipboard();}}
+                    else if(stage==2||stage==4)capture::CopyText(w,L"");
+                    else capture::CopyImage(w,capture::Image(2,2));
+                    if(stage!=4)SetTimer(w,905,stage==7?1900:180,nullptr);return 0;
+                }
+            }
+            if(m==WM_TIMER&&wp==905){SetPropW(w,L"CopyTimerSeen",reinterpret_cast<HANDLE>(1));KillTimer(w,905);SendMessageW(w,WM_COPY,0,0);return 0;}
+            if(m==WM_TIMER&&wp==906){KillTimer(w,906);CloseClipboard();return 0;}
+            if(helper&&((m==WM_COPY)||(m==WM_CHAR&&wp==3))){
                 if(m!=WM_COPY&&GetPropW(w,L"DelayedCopyFixture"))SetTimer(w,903,180,nullptr);
                 else PostMessageW(helper,WM_APP+12,0,0);return 0;
             }
@@ -298,15 +441,19 @@ int wmain(int argc,wchar_t** argv){
             if(m==WM_TIMER&&wp==904){KillTimer(w,904);CloseClipboard();return 0;}
             if(m==WM_APP+3){SetPropW(w,L"DelayedCopyFixture",reinterpret_cast<HANDLE>(wp));return 0;}
             if(m==WM_TIMER&&wp==903){KillTimer(w,903);SendMessageW(w,WM_COPY,0,0);return 0;}
-            if(m==WM_KEYDOWN&&wp=='C'&&(GetKeyState(VK_CONTROL)&0x8000)&&GetPropW(w,L"DelayedCopyFixture")){SetTimer(w,903,180,nullptr);return 0;}
+            if(m==WM_CHAR&&wp==3&&GetPropW(w,L"DelayedCopyFixture")){SetTimer(w,903,180,nullptr);return 0;}
             if(m==WM_APP+2){SetPropW(w,L"CopyImageFixture",reinterpret_cast<HANDLE>(wp));return 0;}
-            if(m==WM_KEYDOWN&&wp=='C'&&(GetKeyState(VK_CONTROL)&0x8000)&&GetPropW(w,L"CopyImageFixture")){capture::CopyImage(w,capture::Image(2,2));return 0;}
+            if(m==WM_CHAR&&wp==3&&GetPropW(w,L"CopyImageFixture")){capture::CopyImage(w,capture::Image(2,2));return 0;}
             return DefSubclassProc(w,m,wp,lp);
         },1,0);
+        SetPropW(host,L"CopyFixtureReady",reinterpret_cast<HANDLE>(1));
         while(IsWindow(host))Pump(20);if(helperProcess){WaitForSingleObject(helperProcess,2000);CloseHandle(helperProcess);}CoUninitialize();return 0;
     }
     try{
         if(argc>1&&std::wstring(argv[1])==L"selection-helpers"){HelperSelectionCase();CoUninitialize();return 0;}
+        if(argc>1&&std::wstring(argv[1])==L"selection-staged"){StagedSelectionCase();CoUninitialize();return 0;}
+        if(argc>1&&std::wstring(argv[1])==L"selection-medium"){StagedSelectionCase(true);CoUninitialize();return 0;}
+        if(argc>1&&std::wstring(argv[1])==L"selection-external"){Require(argc==3,"external fixture HWND argument required");ExternalSelectionCase(reinterpret_cast<HWND>(_wcstoui64(argv[2],nullptr,10)));CoUninitialize();return 0;}
         if(argc>3&&std::wstring(argv[1])==L"npp"){
             NotepadPlusCase(argv[2],argv[3]);CoUninitialize();return 0;
         }
@@ -337,7 +484,7 @@ int wmain(int argc,wchar_t** argv){
         controller.Configure(host,true,[]{return true;},false);
         if(eAvailable){
             ActivateSource(host);AltE();
-            Require(Until([&]{auto first=OwnWindow(L"PcTool.Translation");return first&&IsWindowVisible(first)&&!IsIconic(first)&&Status(first)==L"识别内容为空";},500),"first-ever empty Alt+E did not create visible popup");
+            Require(Until([&]{auto first=OwnWindow(L"PcTool.Translation");return first&&IsWindowVisible(first)&&!IsIconic(first)&&Status(first)==L"正在复制所选文字…";},500),"first-ever empty Alt+E did not create visible popup");
             Require((GetWindowLongPtrW(OwnWindow(L"PcTool.Translation"),GWL_EXSTYLE)&WS_EX_TOPMOST)!=0,"passive popup lost topmost band during shadow synchronization");
             DesktopSnapshot(OwnWindow(L"PcTool.Translation"),output/L"cold-blank.png");Key(VK_ESCAPE);
         }
@@ -571,7 +718,8 @@ int wmain(int argc,wchar_t** argv){
         Require(Until([&]{return IsWindowVisible(popup);},450),"immediate empty selection popup latency");
         std::cout<<"Empty selection popup latency: "<<(GetTickCount64()-emptyCopyStart)<<" ms\n";
         PostMessageW(popup,WM_APP+79,0,0);Pump(30);Require(IsWindowVisible(popup),"stale deactivation hid new invocation");
-        Require(capture::WindowText(edit).empty(),"stale clipboard not imported");Require(Status(popup)==L"识别内容为空","empty warning must be immediate");DesktopSnapshot(popup,output/L"empty-visible-desktop.png");Require(ClipboardText().empty(),"empty selection leaves clipboard empty");SetForegroundWindow(popup);SetFocus(edit);Pump(70);Require(Status(popup)==L"识别内容为空","focusing empty input must not report cancellation");
+        Require(capture::WindowText(edit).empty(),"stale clipboard not imported");Require(Status(popup)==L"正在复制所选文字…","copy must show progress before its deadline");
+        Require(Until([&]{return Status(popup)==L"识别内容为空";}),"empty warning missing after copy deadline");DesktopSnapshot(popup,output/L"empty-visible-desktop.png");Require(ClipboardText().empty(),"empty selection leaves clipboard empty");SetForegroundWindow(popup);SetFocus(edit);Pump(70);Require(Status(popup)==L"识别内容为空","focusing empty input must not report cancellation");
         ActivateSource(target);SendMessageW(childEdit,WM_APP+2,1,0);controller.HandleHotkey(translation::SelectionHotkey);
         Require(Until([&]{return Status(popup).find(L"识别内容为空")!=std::wstring::npos;}),"non-text clipboard rejected");Require(capture::WindowText(edit).empty()&&IsWindowVisible(popup),"image copied into input");Require(IsWindowVisible(GetDlgItem(popup,1201)),"empty warning visible");Require(!IsWindowVisible(Child(popup,1120)),"empty sources collapsed");Snapshot(popup,output/L"empty-warning.png");
         for(UINT warningDpi:{96u,144u,192u}){RECT bounds{170,140,170+MulDiv(430,warningDpi,96),140+MulDiv(330,warningDpi,96)};SendMessageW(popup,WM_DPICHANGED,MAKEWPARAM(warningDpi,warningDpi),reinterpret_cast<LPARAM>(&bounds));Pump(50);Snapshot(popup,output/(L"empty-warning-"+std::to_wstring(warningDpi)+L".png"));}
@@ -587,7 +735,7 @@ int wmain(int argc,wchar_t** argv){
         Require(ClipboardText()!=L"original clipboard before TTime selection","cancel must not restore old clipboard");Require(!(GetAsyncKeyState(VK_CONTROL)&0x8000)&&!(GetAsyncKeyState('C')&0x8000),"cancel releases synthetic keys");
         ActivateSource(host);controller.HandleHotkey(translation::SelectionHotkey);Require(IsWindowVisible(popup),"blank surface opens popup immediately");
         Require(Until([&]{return Status(popup)==L"识别内容为空"&&IsWindowVisible(popup);}),"blank surface displays empty warning");
-        controller.HandleHotkey(translation::SelectionHotkey);Require(IsWindowVisible(popup)&&Status(popup)==L"识别内容为空","repeat empty surface remains open");
+        controller.HandleHotkey(translation::SelectionHotkey);Require(IsWindowVisible(popup)&&Status(popup)==L"正在复制所选文字…","repeat empty surface remains open with progress");
         ShowWindow(popup,SW_MINIMIZE);Pump(40);ActivateSource(host);controller.HandleHotkey(translation::SelectionHotkey);Pump(40);
         Require(IsWindowVisible(popup)&&!IsIconic(popup),"blank Alt+E did not restore minimized popup");
         // A transient activation notification must not turn passive presentation
@@ -599,7 +747,7 @@ int wmain(int argc,wchar_t** argv){
             for(int attempt=0;attempt<12;++attempt){
                 switch(attempt%4){case 0:ShowWindow(popup,SW_HIDE);break;case 1:ShowWindow(popup,SW_MINIMIZE);break;case 2:SendMessageW(popup,WM_CLOSE,0,0);break;default:break;}
                 ActivateSource(host);const auto sequence=GetClipboardSequenceNumber();AltE();
-                Require(Until([&]{return GetClipboardSequenceNumber()!=sequence&&IsWindowVisible(popup)&&!IsIconic(popup)&&Status(popup)==L"识别内容为空";},500),"blank Alt+E visibility state matrix");
+                Require(Until([&]{return GetClipboardSequenceNumber()!=sequence&&IsWindowVisible(popup)&&!IsIconic(popup)&&Status(popup)==L"正在复制所选文字…";},500),"blank Alt+E visibility state matrix");
                 SendMessageW(popup,WM_ACTIVATE,WA_ACTIVE,reinterpret_cast<LPARAM>(host));SendMessageW(popup,WM_ACTIVATE,WA_INACTIVE,reinterpret_cast<LPARAM>(host));Pump(40);
                 RECT bounds{};GetWindowRect(popup,&bounds);Require(IsWindowVisible(popup)&&GetAncestor(WindowFromPoint({(bounds.left+bounds.right)/2,(bounds.top+bounds.bottom)/2}),GA_ROOT)==popup,"blank popup hidden or occluded after activation messages");
                 Require(capture::WindowText(edit).empty(),"blank state reused previous input");
@@ -623,7 +771,7 @@ int wmain(int argc,wchar_t** argv){
         Require(IsWindowVisible(popup)&&capture::WindowText(edit).empty(),"new keyboard input cancels late copy without hide cycle");
         ActivateSource(target);SendMessageW(target,WM_APP+1,0,0);controller.HandleHotkey(translation::SelectionHotkey);SetWindowTextW(edit,L"user input during delayed copy");Pump(350);Require(capture::WindowText(edit)==L"user input during delayed copy","late selection overwrote user input");SendMessageW(childEdit,WM_APP+3,0,0);
         ActivateSource(target);SendMessageW(target,WM_APP+1,0,0);SendMessageW(childEdit,WM_APP+4,0,0);controller.HandleHotkey(translation::SelectionHotkey);
-        Require(IsWindowVisible(popup)&&Status(popup)==L"识别内容为空","clipboard contention must not delay popup");Require(Until([&]{return capture::WindowText(edit).find(L"中文取词")!=std::wstring::npos;}),"clipboard contention retry");
+        Require(IsWindowVisible(popup)&&Status(popup)==L"正在复制所选文字…","clipboard contention must not delay popup");Require(Until([&]{return capture::WindowText(edit).find(L"中文取词")!=std::wstring::npos;}),"clipboard contention retry");
         auto nativeClick=[](HWND control){RECT bounds{};GetWindowRect(control,&bounds);SetCursorPos((bounds.left+bounds.right)/2,(bounds.top+bounds.bottom)/2);INPUT input[2]{};for(auto& i:input)i.type=INPUT_MOUSE;input[0].mi.dwFlags=MOUSEEVENTF_LEFTDOWN;input[1].mi.dwFlags=MOUSEEVENTF_LEFTUP;SendInput(2,input,sizeof(INPUT));Pump(80);};
         for(int control:{1101,1102}){
             ActivateSource(host);controller.HandleHotkey(translation::SelectionHotkey);Require(IsWindowVisible(popup),"blank popup before real inside click");

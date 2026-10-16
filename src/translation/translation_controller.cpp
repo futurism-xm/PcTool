@@ -3,6 +3,7 @@
 #include "translation/translation_capture.h"
 #include "translation/translation_view.h"
 #include "translation/translation_input_watch.h"
+#include "translation/source_menu_probe.h"
 #include "translation/clipboard_source.h"
 #include "translation/source_settings.h"
 #include "translation/source_provider.h"
@@ -33,6 +34,10 @@ struct OcrCompletion {uint64_t revision{};std::wstring text,error;};
 RECT MouseWorkArea(POINT point){MONITORINFO m{sizeof(m)};GetMonitorInfoW(MonitorFromPoint(point,MONITOR_DEFAULTTONEAREST),&m);return m.rcWork;}
 bool DesktopWindow(HWND w){if(!w)return true;wchar_t name[64]{};GetClassNameW(w,name,64);return wcscmp(name,L"Progman")==0||wcscmp(name,L"WorkerW")==0||wcscmp(name,L"Shell_TrayWnd")==0;}
 bool SameCopyForeground(HWND target){auto foreground=GetForegroundWindow();return foreground==target||(DesktopWindow(foreground)&&DesktopWindow(target));}
+bool NativeEditorFocus(HWND focus){
+    wchar_t name[128]{};GetClassNameW(focus,name,128);
+    return _wcsicmp(name,L"Edit")==0||_wcsicmp(name,L"RICHEDIT50W")==0||_wcsicmp(name,L"RichEdit20W")==0||_wcsicmp(name,L"RichEdit20A")==0||_wcsicmp(name,L"Scintilla")==0;
+}
 bool HasText(const std::wstring& text){return std::any_of(text.begin(),text.end(),[](wchar_t c){return !(std::iswspace(c)||c==0x85||c==0xa0||c==0x1680||(c>=0x2000&&c<=0x200b)||c==0x2028||c==0x2029||c==0x202f||c==0x205f||c==0x3000||c==0xfeff);});}
 
 }
@@ -165,9 +170,12 @@ struct TranslationController::Impl {
     std::shared_ptr<capture::Cancellation> cancellation;
     std::vector<std::future<OcrCompletion>> workers;
     enum class Pending {None,WaitKeys,PrepareCopy,Clipboard,Ocr};Pending pending{Pending::None};
-    HWND target{},lastSelectionSource{};DWORD targetPid{},lastSelectionPid{},clearedSequence{};ULONGLONG deadline{};bool copyKeysDown{},readRetry{},copyListening{},transferringFocus{},copyInputPending{};
+    HWND target{},lastSelectionSource{},sourceFocus{};DWORD targetPid{},lastSelectionPid{},clearedSequence{},readSequence{};ULONGLONG deadline{};bool copyKeysDown{},readRetry{},copyListening{},transferringFocus{},copyInputPending{};
     ClipboardSource copySource;
     InputWatch inputWatch;uint64_t copyInputSerial{};
+    struct MenuCheck {uint64_t request;std::future<SourceMenuState> result;};
+    std::vector<MenuCheck> menuChecks;
+    bool altMasked{},menuCheckStarted{},menuChecked{},menuDismissed{};
     Impl(){Gdiplus::GdiplusStartupInput input;Gdiplus::GdiplusStartup(&gdiplus,&input,nullptr);}
     ~Impl(){Shutdown();if(gdiplus)Gdiplus::GdiplusShutdown(gdiplus);}
     int Dip(int n)const{return MulDiv(n,dpi,96);}
@@ -413,6 +421,20 @@ struct TranslationController::Impl {
             if(!IsWindow(lastSelectionSource)||pid!=lastSelectionPid){FinishEntry(EntryOutcome::Failure,L"原取词窗口已关闭，请回到需要取词的应用重试。");return;}
             original=lastSelectionSource;
         }
+        // RegisterHotKey consumes E, but the source still receives Alt-up. In
+        // WPF that can activate the menu bar even though no Win32 menu flag is
+        // set. Mask only this accepted chord, before creating/showing our UI.
+        // VK_E8 is unassigned and produces no character or modifier state.
+        altMasked=false;menuCheckStarted=false;menuChecked=false;menuDismissed=false;
+        if(!fromMenu&&(bindings[4].modifiers&MOD_ALT)&&GetForegroundWindow()==original&&(GetAsyncKeyState(VK_MENU)&0x8000)){
+            INPUT mask[2]{};for(auto& key:mask){key.type=INPUT_KEYBOARD;key.ki.wVk=0xE8;key.ki.dwExtraInfo=CopyInputTag;}
+            mask[1].ki.dwFlags=KEYEVENTF_KEYUP;
+            if(SendInput(2,mask,sizeof(INPUT))!=2){CopyFailed(L"无法准备取词按键，请检查来源程序与 PcTool 的运行权限。");return;}
+            altMasked=true;
+            Trace(L"copy-alt-menu-masked");
+        }
+        GUITHREADINFO originalGui{sizeof(originalGui)};
+        sourceFocus=GetGUIThreadInfo(GetWindowThreadProcessId(original,nullptr),&originalGui)?originalGui.hwndFocus:nullptr;
         selection.Cancel();Ensure();Replace(L"");scrollOffset=0;
         target=original;GetWindowThreadProcessId(target,&targetPid);lastSelectionSource=target;lastSelectionPid=targetPid;
         if(!copySource.Begin(targetPid)){CopyFailed(L"无法访问取词来源进程，请回到原应用重试。");return;}
@@ -420,19 +442,18 @@ struct TranslationController::Impl {
         transferringFocus=repeated||fromMenu;
         if(transferringFocus&&!SetForegroundWindow(target)){CopyFailed(L"无法激活原取词窗口，请回到原应用后重试。");return;}
         // Do not hide an existing popup while restoring the source application's focus.
-        Show(false);SetStatus(L"识别内容为空");
+        Show(false);SetStatus(L"正在复制所选文字…");
         inputWatch.BeginCopy(revision,bindings[4].key);
         if(!WatchCopy()){CopyFailed(L"无法监听本次复制，请重试。");return;}
         StartCopy();
     }
     void ClipboardUpdated(){
         Trace(L"clipboard-update");
-        if(copyInputPending||inputWatch.Serial()!=copyInputSerial||pending!=Pending::Clipboard||GetClipboardSequenceNumber()==clearedSequence)return;
+        const auto currentSequence=GetClipboardSequenceNumber();
+        if(copyInputPending||inputWatch.Serial()!=copyInputSerial||pending!=Pending::Clipboard||currentSequence==clearedSequence||(!readRetry&&currentSequence==readSequence))return;
         if(!SameCopyForeground(target)&&GetForegroundWindow()!=window){Trace(L"copy-source-changed");CopyFailed(L"取词来源窗口已改变，请回到原应用重试。");return;}
         if(!OpenClipboard(window)){
-            if(!readRetry){readRetry=true;deadline=GetTickCount64()+1500;}
-            else if(GetTickCount64()>deadline)CopyFailed(L"无法读取剪贴板，请关闭占用剪贴板的程序后重试。");
-            return;
+            readRetry=true;return;
         }
         const DWORD sequence=GetClipboardSequenceNumber();const HWND clipboardOwner=GetClipboardOwner();DWORD sourcePid{};GetWindowThreadProcessId(clipboardOwner,&sourcePid);
         // A fully rendered clipboard can outlive its owner window. In that
@@ -444,11 +465,17 @@ struct TranslationController::Impl {
         if(ownerlessCopy)Trace(L"copy-ownerless-request-accepted");
         else if(sourcePid!=targetPid)Trace(L"copy-helper-owner-accepted");
         std::wstring text;const bool read=ReadClipboardText(text);CloseClipboard();
-        if(sequence!=GetClipboardSequenceNumber()){readRetry=true;deadline=GetTickCount64()+1500;return;}
+        if(sequence!=GetClipboardSequenceNumber()){readRetry=true;return;}
         Trace(!read?L"copy-read-failed":HasText(text)?L"copy-text-ready":L"copy-empty");
-        if(!read)CopyFailed(L"无法读取复制的文字，请重试。");
-        else if(!HasText(text))FinishEntry(EntryOutcome::Empty);
-        else FinishEntry(EntryOutcome::Success,std::move(text));
+        readRetry=!read;
+        // A successfully read empty/intermediate state needs no further lock
+        // until its sequence changes. Reopening it on every timer tick can
+        // contend with the source's later native WM_COPY. Failed reads retry.
+        if(read)readSequence=sequence;
+        // Clipboard notifications describe intermediate states too. Editors can
+        // publish formats/empty text first and render Unicode text later. Keep
+        // the request alive until text arrives or its fixed deadline expires.
+        if(read&&HasText(text))FinishEntry(EntryOutcome::Success,std::move(text));
     }
     void StartCopy(){
         if(!SameCopyForeground(target)){
@@ -457,6 +484,7 @@ struct TranslationController::Impl {
         }
         transferringFocus=false;
         if(pending==Pending::WaitKeys){
+            if(GetTickCount64()>deadline){CopyFailed(L"请松开取词快捷键及其他修饰键后重试。");return;}
             for(int key:{int(bindings[4].key),VK_LMENU,VK_RMENU,VK_LCONTROL,VK_RCONTROL,VK_LSHIFT,VK_RSHIFT,VK_LWIN,VK_RWIN})if(GetAsyncKeyState(key)&0x8000)return;
             inputWatch.KeysReleased();pending=Pending::PrepareCopy;deadline=GetTickCount64()+1500;Trace(L"copy-keys-released");
             // Yield this dispatch so the source can consume the physical Alt-up.
@@ -465,25 +493,53 @@ struct TranslationController::Impl {
         }
         GUITHREADINFO gui{sizeof(gui)};
         if(GetGUIThreadInfo(GetWindowThreadProcessId(target,nullptr),&gui)&&(gui.flags&(GUI_INMENUMODE|GUI_POPUPMENUMODE|GUI_SYSTEMMENUMODE))){
+            if(menuDismissed){Trace(L"copy-menu-exit-failed");CopyFailed(L"来源窗口仍处于菜单状态，请关闭菜单后重试。");return;}
             DWORD_PTR ignored{};
             if(!SendMessageTimeoutW(target,WM_CANCELMODE,0,0,SMTO_ABORTIFHUNG|SMTO_BLOCK,100,&ignored)){CopyFailed(L"无法退出来源窗口的菜单状态，请关闭菜单后重试。");return;}
+            menuDismissed=true;
             Trace(L"copy-source-menu-dismissed");
+            return; // Verify on a later dispatch; WM_CANCELMODE is not an acknowledgement.
+        }
+        // If the physical chord was already released before WM_HOTKEY was
+        // handled, masking is too late. WPF menus require an accessibility
+        // check because hwndFocus and GUI_INMENUMODE can both stay unchanged.
+        if(!altMasked&&!NativeEditorFocus(sourceFocus)&&(bindings[4].modifiers&MOD_ALT)&&!menuChecked){
+            if(GetTickCount64()>deadline){Trace(L"copy-menu-probe-timeout");CopyFailed(L"无法确认来源窗口的编辑焦点，请关闭菜单后重试。");return;}
+            if(!menuCheckStarted&&menuChecks.empty()){menuChecks.push_back({revision,ProbeSourceMenu(targetPid)});menuCheckStarted=true;}
+            return;
+        }
+        if(sourceFocus&&IsWindow(sourceFocus)&&GetGUIThreadInfo(GetWindowThreadProcessId(target,nullptr),&gui)&&gui.hwndFocus!=sourceFocus){
+            Trace(L"copy-editor-focus-changed");CopyFailed(L"来源窗口的编辑焦点已改变，请重新选中文字后重试。");return;
         }
         if(!OpenClipboard(window)){if(GetTickCount64()>deadline)CopyFailed(L"剪贴板被占用，请稍后重试。");return;}
-        const bool cleared=EmptyClipboard()!=FALSE;clearedSequence=GetClipboardSequenceNumber();CloseClipboard();
+        const bool cleared=EmptyClipboard()!=FALSE;readSequence=clearedSequence=GetClipboardSequenceNumber();CloseClipboard();
         if(!cleared){CopyFailed(L"无法清空剪贴板，请重试。");return;}
         INPUT input[4]{};for(auto& key:input){key.type=INPUT_KEYBOARD;key.ki.dwExtraInfo=CopyInputTag;}
         input[0].ki.wVk=VK_CONTROL;input[1].ki.wVk='C';input[2].ki.wVk='C';input[2].ki.dwFlags=KEYEVENTF_KEYUP;input[3].ki.wVk=VK_CONTROL;input[3].ki.dwFlags=KEYEVENTF_KEYUP;
         // Publish reception state before dispatch; clipboard delivery is asynchronous.
-        copyKeysDown=true;pending=Pending::Clipboard;
-        if(SendInput(4,input,sizeof(INPUT))!=4){CopyFailed(L"无法向目标程序发送复制按键，请检查目标程序权限。");return;}
+        copyKeysDown=true;pending=Pending::Clipboard;deadline=GetTickCount64()+1500;
+        if(SendInput(4,input,sizeof(INPUT))!=4){Trace(L"copy-input-dispatch-failed");CopyFailed(L"无法向来源程序发送 Ctrl+C，请检查来源程序的运行权限或安全桌面状态。");return;}
         copyKeysDown=false;
         // The passive popup is already visible. Do not start a second visibility
         // generation here: that would invalidate a mouse cancellation queued during SendInput.
         Trace(L"copy-dispatched");
     }
-    void CopyFailed(const wchar_t* message){ReleaseCopyKeys();FinishEntry(EntryOutcome::Failure,message);}
+    void CopyFailed(const wchar_t* message){Trace(L"copy-failed");ReleaseCopyKeys();FinishEntry(EntryOutcome::Failure,message);}
     void Tick(){
+        for(auto it=menuChecks.begin();it!=menuChecks.end();){
+            if(it->result.wait_for(std::chrono::seconds(0))!=std::future_status::ready){++it;continue;}
+            const auto request=it->request;const auto state=it->result.get();it=menuChecks.erase(it);
+            if(request!=revision||pending!=Pending::PrepareCopy)continue;
+            menuCheckStarted=false;
+            if(!SameCopyForeground(target)||inputWatch.Serial()!=copyInputSerial){CopyFailed(L"取词来源或输入已改变，请重试。");continue;}
+            if(!state.available){Trace(L"copy-menu-probe-unavailable");CopyFailed(L"无法确认来源窗口的编辑焦点，请关闭菜单后重试。");continue;}
+            if(state.menu){
+                if(menuDismissed){Trace(L"copy-menu-exit-failed");CopyFailed(L"来源窗口仍处于菜单状态，请关闭菜单后重试。");continue;}
+                INPUT escape[2]{};for(auto& key:escape){key.type=INPUT_KEYBOARD;key.ki.wVk=VK_ESCAPE;key.ki.dwExtraInfo=CopyInputTag;}escape[1].ki.dwFlags=KEYEVENTF_KEYUP;
+                if(SendInput(2,escape,sizeof(INPUT))!=2){CopyFailed(L"无法退出来源窗口的菜单状态，请重试。");continue;}
+                menuDismissed=true;Trace(L"copy-custom-menu-dismissed");
+            }else {menuChecked=true;Trace(L"copy-editor-focus-verified");}
+        }
         if(menuCaptureDue){
             if(GetAsyncKeyState(VK_ESCAPE)&0x8000){menuCaptureDue=0;return;}
             if(GetTickCount64()>=menuCaptureDue){menuCaptureDue=0;Capture();return;}
@@ -506,7 +562,16 @@ struct TranslationController::Impl {
             Trace(L"copy-focus-cancel");CopyFailed(L"取词来源窗口已改变，请回到原应用重试。");
         }
         if(!copyInputPending&&(pending==Pending::WaitKeys||pending==Pending::PrepareCopy))StartCopy();
-        else if(!copyInputPending&&pending==Pending::Clipboard&&readRetry)ClipboardUpdated();
+        else if(!copyInputPending&&pending==Pending::Clipboard){
+            // Poll as a fallback to coalesced/missed notifications, including
+            // updates which initially contained no text. Never extend the deadline.
+            ClipboardUpdated();
+            if(pending==Pending::Clipboard&&GetTickCount64()>=deadline){
+                Trace(L"copy-timeout");
+                if(readRetry)CopyFailed(L"无法读取剪贴板，请关闭占用剪贴板的程序后重试。");
+                else FinishEntry(EntryOutcome::Empty);
+            }
+        }
         for(auto it=workers.begin();it!=workers.end();){
             if(it->wait_for(std::chrono::seconds(0))!=std::future_status::ready){++it;continue;}
             auto result=it->get();it=workers.erase(it);

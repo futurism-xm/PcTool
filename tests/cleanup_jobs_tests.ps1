@@ -6,6 +6,7 @@ $namespace='PcToolTest-'+[guid]::NewGuid().ToString('N')
 if(!$Output){$Output=Join-Path $project ('out/cleanup-jobs-tests/'+$namespace)}
 $fixture=[IO.Path]::GetFullPath($Output)
 [void](New-Item -ItemType Directory -Path $fixture -Force)
+& (Join-Path $PSScriptRoot 'cleanup_module_tests.ps1') -Output (Join-Path $fixture 'module-import')
 $roots=[Collections.Generic.List[string]]::new()
 function Check([bool]$Value,[string]$Message){if(!$Value){throw $Message}}
 function Prepare([string]$Name){
@@ -97,8 +98,11 @@ public static class CleanupMappedFixture {
  Wait-For {Test-Path -LiteralPath (Join-Path $registered.Directory 'last-result.txt')} 'Scheduled SYSTEM worker did not record locked file'
  Check (Test-Path -LiteralPath (Join-Path $root '.pctool-uninstalling')) 'Guard removed while DLL locked'
  Check (Test-Path -LiteralPath (Join-Path $root '.pctool-install-instance.json')) 'Instance removed while DLL locked'
- $held.Dispose();$held=$null
+ # Keep the DLL locked until the first attempt exits; otherwise that attempt
+ # can finish cleanup and delete its task before the state query below.
  Wait-For {$scheduler.Folder.GetTask($registered.Job.TaskName).State -ne 4} 'Pending task attempt did not exit'
+ Check ($task.LastTaskResult -eq 2) 'Locked-file task did not return pending'
+ $held.Dispose();$held=$null
  [void]$task.Run($null)
  Wait-For {!(Test-Path -LiteralPath $registered.Directory)} 'Worker did not remove completed task record'
  Check (!(Test-Path -LiteralPath $root)) 'Successful uninstall did not clear exact fixture root'

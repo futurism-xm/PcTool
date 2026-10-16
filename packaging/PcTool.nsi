@@ -256,6 +256,14 @@ Section "PcTool 与完整 7-Zip" Main
     Abort
   ${EndIf}
   System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
+  nsExec::ExecToStack '"$INSTDIR\PcTool.exe" --configure-startup "${PCTOOL_CLEANUP_NAMESPACE}"'
+  Pop $0
+  Pop $1
+  ${If} $0 != 0
+    DetailPrint "程序文件和菜单已安装，但管理员开机启动配置失败（$0）。"
+    MessageBox MB_ICONEXCLAMATION "程序文件和菜单已安装，但管理员开机启动配置失败（$0）。请手动启动 PcTool 查看具体路径。支持非系统盘安装，可使用 D:\PcTool 等受保护的独立目录；程序及上级目录不能被普通进程替换。" /SD IDOK
+    SetErrorLevel 1603
+  ${EndIf}
   !insertmacro FinishTransaction
 SectionEnd
 

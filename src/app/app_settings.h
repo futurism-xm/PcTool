@@ -41,7 +41,7 @@ public:
     [[nodiscard]] bool MonitorInTaskbar() const noexcept { return monitorInTaskbar_; }
     void SetMonitorInTaskbar(bool enabled) noexcept { monitorInTaskbar_ = enabled; }
 
-    bool ApplyAutoStart() const;
+    bool ApplyAutoStart(std::wstring* error=nullptr,const std::wstring& nameSpace=L"PcTool") const;
     const hotkeys::Bindings& Hotkeys() const noexcept {return hotkeys_;}
     void SetHotkeys(const hotkeys::Bindings& keys) {hotkeys_=keys;}
 

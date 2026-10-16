@@ -355,6 +355,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int) {
     if (GetFileAttributesW((app_storage::Root() / L".pctool-uninstalling").c_str()) != INVALID_FILE_ATTRIBUTES)
         return ERROR_INSTALL_ALREADY_RUNNING;
     int argc=0;auto argv=CommandLineToArgvW(GetCommandLineW(),&argc);
+    // Installer entry: migrate startup before the next logon, without opening
+    // the application, claiming its instance mutex or touching other installs.
+    if(argv&&argc>=2&&wcscmp(argv[1],L"--configure-startup")==0){
+        const std::wstring nameSpace=argc==3?argv[2]:L"";LocalFree(argv);
+        if(nameSpace.empty())return ERROR_INVALID_PARAMETER;
+        try{AppSettings settings;settings.Load();std::wstring error;return settings.ApplyAutoStart(&error,nameSpace)?0:ERROR_INSTALL_FAILURE;}
+        catch(...){return ERROR_INVALID_DATA;}
+    }
     if(argv && argc>=2 && wcscmp(argv[1],L"--archive")==0) {
         const std::wstring path=argc>=3?argv[2]:L"";LocalFree(argv);
         return archive::OpenManager(nullptr,path)?0:1;
@@ -402,7 +410,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int) {
 
     AppSettings settings;
     try{settings.Load();}catch(...){MessageBoxW(nullptr,L"无法读取安装目录中的配置文件。",L"PcTool",MB_OK|MB_ICONERROR);return 1;}
-    settings.ApplyAutoStart();
+    std::wstring startupError;
+    if(!settings.ApplyAutoStart(&startupError))MessageBoxW(nullptr,startupError.c_str(),L"PcTool · 管理员开机启动",MB_OK|MB_ICONWARNING);
     settings.Save();
 
     const int exitCode = [&]() {

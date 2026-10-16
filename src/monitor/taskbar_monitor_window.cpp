@@ -747,10 +747,11 @@ void TaskbarMonitorWindow::HandleMenuCommand(UINT command) {
     if (command == kAutoStartCommand) {
         const bool oldValue = settings_.AutoStartEnabled();
         settings_.SetAutoStartEnabled(!oldValue);
-        if (!settings_.ApplyAutoStart() || !settings_.Save()) {
+        std::wstring startupError;
+        if (!settings_.ApplyAutoStart(&startupError) || !settings_.Save()) {
             settings_.SetAutoStartEnabled(oldValue);
             settings_.ApplyAutoStart();
-            MessageBoxW(window_, L"修改开机启动设置失败。", L"PcTool", MB_OK | MB_ICONWARNING);
+            MessageBoxW(window_, startupError.empty()?L"保存开机启动设置失败。":startupError.c_str(), L"PcTool", MB_OK | MB_ICONWARNING);
         }
         return;
     }

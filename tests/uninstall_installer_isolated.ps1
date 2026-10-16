@@ -27,6 +27,30 @@ if(!(Test-Path -LiteralPath $compiler)){$compiler=(Get-ChildItem "$project/out/p
 if($LASTEXITCODE){throw "Isolated NSIS compilation failed: $base/compile.log"}
 $clsid='{23170F69-40C1-278A-1000-000100020000}'
 $keys=@();$processes=@();$hosts=@();$destinations=@()
+$startupService=New-Object -ComObject 'Schedule.Service';$startupService.Connect();$startupFolder=$null
+$startupSid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+function Startup-Folder {
+ if(!$script:startupFolder){
+  try{$parent=$startupService.GetFolder('\'+$cleanupNamespace)}catch{
+   if($_.Exception.GetBaseException().HResult -notin @(-2147024894,-2147024893)){throw}
+   $parent=$startupService.GetFolder('\').CreateFolder($cleanupNamespace,'O:BAG:SYD:P(A;;GA;;;SY)(A;;GA;;;BA)')
+  }
+  try{$script:startupFolder=$parent.GetFolder('Startup')}catch{
+   if($_.Exception.GetBaseException().HResult -notin @(-2147024894,-2147024893)){throw}
+   $script:startupFolder=$parent.CreateFolder('Startup','O:BAG:SYD:P(A;;GA;;;SY)(A;;GA;;;BA)')
+  }
+ }
+ return $script:startupFolder
+}
+function Register-StartupFixture([string]$destination){
+ $folder=Startup-Folder;$definition=$startupService.NewTask(0)
+ $definition.Principal.UserId=$startupSid;$definition.Principal.LogonType=3;$definition.Principal.RunLevel=1
+ # This action is only an uninstall ownership fixture, never an executable task.
+ $definition.Settings.Enabled=$false
+ $definition.RegistrationInfo.Description='PcTool Startup v1|'+$startupSid+'|'+$destination+'\PcTool.exe'
+ $entry=$definition.Actions.Create(0);$entry.Path=Join-Path $destination 'PcTool.exe';$entry.Arguments='--background'
+ [void]$folder.RegisterTaskDefinition(($startupSid+'-'+(Get-CleanupRootHash $destination)),$definition,22,$startupSid,$null,3,'O:BAG:SYD:P(A;;GA;;;SY)(A;;GA;;;BA)')
+}
 function Check([bool]$condition,[string]$message){if(!$condition){throw $message}}
 function Read-Value($registry,$path,$name=''){
  $key=$registry.OpenSubKey($path);if(!$key){return $null};try{return $key.GetValue($name)}finally{$key.Dispose()}
@@ -37,6 +61,9 @@ function Production-Snapshot {
   $values+=Read-Value $registry 'Software\Microsoft\Windows\CurrentVersion\Shell Extensions\Approved' $clsid
   $values+=Read-Value $registry 'Software\PcToolInstaller' 'InstallDir'
  }
+ $userRun=[Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\Microsoft\Windows\CurrentVersion\Run')
+ if($userRun){try{$values+=$userRun.GetValue('PcTool')}finally{$userRun.Dispose()}}
+ try{$productionStartup=$startupService.GetFolder('\PcTool\Startup');$values+=@($productionStartup.GetTasks(1)|ForEach-Object {$_.Xml})}catch{if($_.Exception.GetBaseException().HResult -notin @(-2147024894,-2147024893)){throw}}
  return ConvertTo-Json -InputObject $values -Compress
 }
 function Queue-Snapshot {
@@ -44,11 +71,17 @@ function Queue-Snapshot {
  try{return @($key.GetValue('PendingFileRenameOperations',[string[]]@())) -join "`0"}finally{$key.Dispose()}
 }
 function Install-App($destination){
+ # Explicit user preference: these writable-path lifecycle fixtures do not
+ # enable elevated autostart. Its enabled path is tested in protected fixtures.
+ New-Item -ItemType Directory -Path (Join-Path $destination 'Data') -Force | Out-Null
+ [IO.File]::WriteAllText((Join-Path $destination 'Data/settings.ini'),"[PcTool]`r`nVersion=1`r`nAutoStart=0`r`n",[Text.UTF8Encoding]::new($false))
  $setup=Start-Process -FilePath "$base/Setup.exe" -ArgumentList @('/S',"/D=$destination") -WindowStyle Hidden -PassThru -Wait
  Check ($setup.ExitCode -eq 0) "Install failed: $($setup.ExitCode)"
  Check (Test-Path "$destination/.pctool-managed-files.json") 'Installed inventory missing'
  foreach($dll in @('7-zip.dll','7-zip32.dll')){Check ((Get-FileHash "$destination/modules/archive/$dll").Hash -eq (Get-FileHash "$Stage/modules/archive/$dll").Hash) 'Installed extension hash mismatch'}
+ foreach($binary in @('PcTool.exe','PcToolUninstallHelper.exe')){Check ((Get-FileHash (Join-Path $destination $binary)).Hash -eq (Get-FileHash (Join-Path $Stage $binary)).Hash) 'Installed executable hash mismatch'}
  Check (!(Test-Path "$destination/.pctool-uninstalling")) 'Installation retained uninstall guard'
+ Register-StartupFixture $destination
 }
 function Uninstall-App($destination,$label){
  $runner=Join-Path $base "Uninstall-$label.exe"
@@ -56,6 +89,8 @@ function Uninstall-App($destination,$label){
  $elapsed=[Diagnostics.Stopwatch]::StartNew()
  $uninstall=Start-Process -FilePath $runner -ArgumentList @('/S',"_?=$destination") -WindowStyle Hidden -PassThru -Wait
  Check ($uninstall.ExitCode -eq 0) "Uninstall failed: $($uninstall.ExitCode)"
+ $startupName=$startupSid+'-'+(Get-CleanupRootHash $destination)
+ Check (@((Startup-Folder).GetTasks(1)|Where-Object {$_.Name -eq $startupName}).Count -eq 0) 'Uninstall left its administrator startup task'
  foreach($registry in $keys){Check ($null -eq (Read-Value $registry "$namespace\Uninstall" 'DisplayName')) 'Uninstall registration remains'}
  Write-Host "Uninstall $label returned 0 in $([math]::Round($elapsed.Elapsed.TotalSeconds,2)) s"
 }
@@ -166,6 +201,9 @@ try{
  Check ((Queue-Snapshot) -ceq $queueBefore) 'Installer wrote a reboot-delete operation'
  'PASS production registry isolation and no new reboot-delete operations'
  "Evidence: $base"
+}catch{
+ $_ | Format-List * -Force | Out-File (Join-Path $base 'failure.log')
+ throw
 }finally{
  foreach($hostState in $hosts){if(!$hostState.Process.HasExited){[IO.File]::WriteAllText(($hostState.Prefix+'.release'),'release');[void]$hostState.Process.WaitForExit(5000)}}
  foreach($process in $processes){if(!$process.HasExited){$process.Kill();$process.WaitForExit()};$process.Dispose()}
@@ -173,5 +211,9 @@ try{
  foreach($registry in $keys){$registry.DeleteSubKeyTree($namespace,$false);$registry.Dispose()}
  $store=Get-CleanupStore $cleanupNamespace
  if(Test-Path $store){Assert-CleanupSecurity $store;if(!(Get-ChildItem -LiteralPath $store -Force)){[IO.Directory]::Delete($store,$false);[IO.Directory]::Delete((Split-Path -Parent $store),$false)}}
- try{$service=New-Object -ComObject Schedule.Service;$service.Connect();$service.GetFolder('\').DeleteFolder($cleanupNamespace,0)}catch{}
+ # Resolve the folder again: install migration can invalidate cached COM handles.
+ $startupCleanup=$null
+ try{$startupCleanup=$startupService.GetFolder('\'+$cleanupNamespace+'\Startup')}catch{if($_.Exception.GetBaseException().HResult -notin @(-2147024894,-2147024893)){throw}}
+ if($startupCleanup){foreach($task in @($startupCleanup.GetTasks(1))){$startupCleanup.DeleteTask($task.Name,0)};$startupService.GetFolder('\'+$cleanupNamespace).DeleteFolder('Startup',0)}
+ try{$startupService.GetFolder('\').DeleteFolder($cleanupNamespace,0)}catch{}
 }

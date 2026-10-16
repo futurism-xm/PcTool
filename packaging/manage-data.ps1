@@ -109,6 +109,30 @@ if(!(Test-Path -LiteralPath (Join-Path $Root 'PcTool.exe')) -and !(Test-Path -Li
  throw 'Application root is not valid'
 }
 if($Action -eq 'Install'){
+ # The executable, DLLs and their directories must not inherit writable ACEs
+ # from custom locations such as D:\install. Only managed payload ACLs change.
+ function Protect-Payload([string]$path,[bool]$directory){
+  if((Get-Item -LiteralPath $path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Payload cannot be a reparse point'}
+  if($directory){$acl=New-Object Security.AccessControl.DirectorySecurity}else{$acl=New-Object Security.AccessControl.FileSecurity}
+  $acl.SetAccessRuleProtection($true,$false)
+  $acl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
+  foreach($entry in @(@('S-1-5-18','FullControl'),@('S-1-5-32-544','FullControl'),@('S-1-5-32-545','ReadAndExecute'))){
+   $identity=[Security.Principal.SecurityIdentifier]::new($entry[0])
+   if($directory){$rule=[Security.AccessControl.FileSystemAccessRule]::new($identity,$entry[1],'ContainerInherit,ObjectInherit','None','Allow')}
+   else{$rule=[Security.AccessControl.FileSystemAccessRule]::new($identity,$entry[1],'Allow')}
+   [void]$acl.AddAccessRule($rule)
+  }
+  Set-Acl -LiteralPath $path -AclObject $acl
+ }
+ Protect-Payload $Root $true
+ if(Test-Path -LiteralPath $inventoryPath){
+  $payload=Read-Inventory $inventoryPath
+  foreach($relative in @($payload.Directories)+@($payload.Files)){
+   if($relative -match '^(Data|Cache)([\\/]|$)'){continue}
+   $path=Resolve-Owned $relative
+   if(Test-Path -LiteralPath $path){Protect-Payload $path ([bool]((Get-Item -LiteralPath $path -Force).PSIsContainer))}
+  }
+ }else{Protect-Payload (Join-Path $Root 'PcTool.exe') $false}
  $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User
  foreach($name in @('Data','Cache')){
   $path=Join-Path $Root $name
@@ -186,6 +210,25 @@ if($Action -eq 'Finalize'){
 $script:failures=[Collections.Generic.List[string]]::new()
 $classesPath='Software\Classes';$runPath='Software\Microsoft\Windows\CurrentVersion\Run'
 if($CleanupNamespace -ne 'PcTool'){$classesPath='Software\'+$CleanupNamespace+'\Classes';$runPath='Software\'+$CleanupNamespace+'\Run'}
+try {
+ $scheduler=New-Object -ComObject 'Schedule.Service';$scheduler.Connect()
+ $folder=$null
+ try{$folder=$scheduler.GetFolder('\'+$CleanupNamespace+'\Startup')}catch{if($_.Exception.GetBaseException().HResult -notin @(-2147024894,-2147024893)){throw}}
+ if($folder){
+  $hash=Get-CleanupRootHash $Root;$executable=Join-Path $Root 'PcTool.exe'
+  foreach($task in @($folder.GetTasks(1))){
+   $definition=$task.Definition;$sid=[string]$definition.Principal.UserId
+   if($sid -notlike 'S-1-*'){$sid=([Security.Principal.NTAccount]::new($sid)).Translate([Security.Principal.SecurityIdentifier]).Value}
+   if($task.Name -ne ($sid+'-'+$hash) -or $definition.RegistrationInfo.Description -ine ('PcTool Startup v1|'+$sid+'|'+$executable)){continue}
+   if($definition.Principal.LogonType -ne 3 -or $definition.Principal.RunLevel -ne 1 -or $definition.Actions.Count -ne 1){continue}
+   $startupExecAction=$definition.Actions.Item(1)
+   if($startupExecAction.Type -ne 0 -or $startupExecAction.Path -ine $executable -or $startupExecAction.Arguments -cne '--background'){continue}
+   # The native helper already stopped owned processes. Do not stop tasks
+   # here: a replacement definition must never terminate an unrelated app.
+   $folder.DeleteTask($task.Name,0)
+  }
+ }
+}catch{$script:failures.Add('Startup task removal: '+$_.Exception.Message)}
 # Remove this installation's startup entry from every currently loaded user hive.
 try {
  foreach($sid in [Microsoft.Win32.Registry]::Users.GetSubKeyNames() | Where-Object {$_ -match '^S-1-5-\d+(?:-\d+)+$'}){

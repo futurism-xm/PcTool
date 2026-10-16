@@ -12,6 +12,7 @@ set(PCTOOL_TRANSLATION_SOURCES
     src/translation/source_confirmation.cpp
     src/translation/source_icons.cpp
     src/translation/translation_input_watch.cpp
+    src/translation/source_menu_probe.cpp
     src/translation/translation_controller.cpp
     src/translation/translation_capture.cpp
 )
@@ -23,6 +24,7 @@ list(APPEND PCTOOL_LOCAL_HEADERS
     src/translation/source_confirmation.h
     src/translation/source_icons.h
     src/translation/translation_input_watch.h
+    src/translation/source_menu_probe.h
     src/translation/clipboard_source.h
     src/translation/translation_controller.h
     src/translation/translation_capture.h
@@ -32,6 +34,7 @@ list(APPEND PCTOOL_LOCAL_HEADERS
 )
 set(PCTOOL_APP_SOURCES
     src/app/app_settings.cpp
+    src/app/startup_registration.cpp
     src/app/capture_tools.cpp
     src/app/main.cpp
 )
@@ -39,6 +42,7 @@ list(APPEND PCTOOL_CPP_SOURCES ${PCTOOL_APP_SOURCES})
 list(APPEND PCTOOL_LOCAL_HEADERS
     src/app/app_messages.h
     src/app/app_settings.h
+    src/app/startup_registration.h
     src/app/capture_tools.h
 )
 

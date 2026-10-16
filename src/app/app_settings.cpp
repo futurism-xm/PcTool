@@ -1,33 +1,11 @@
 #include "shared/platform/app_storage.h"
 #include "app/app_settings.h"
+#include "app/startup_registration.h"
 
 #include <windows.h>
 
 #include <array>
 #include <string>
-
-namespace {
-constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-constexpr wchar_t kRunValueName[] = L"PcTool";
-
-std::wstring GetExecutablePath() {
-    std::array<wchar_t, 32768> path{};
-    const DWORD length = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
-    if (length == 0 || length >= path.size()) {
-        return {};
-    }
-    return std::wstring(path.data(), length);
-}
-
-std::wstring GetAutoStartCommand() {
-    const std::wstring path = GetExecutablePath();
-    if (path.empty()) {
-        return {};
-    }
-    return L"\"" + path + L"\" --background";
-}
-
-}  // namespace
 
 void AppSettings::Load() {
     const auto path=app_storage::Data()/L"settings.ini";
@@ -65,32 +43,9 @@ bool AppSettings::ToggleItem(MonitorItem item) noexcept {
     return true;
 }
 
-bool AppSettings::ApplyAutoStart() const {
-    HKEY key = nullptr;
-    if (RegCreateKeyExW(
-            HKEY_CURRENT_USER, kRunKey, 0, nullptr, 0, KEY_QUERY_VALUE | KEY_SET_VALUE,
-            nullptr, &key, nullptr) != ERROR_SUCCESS) {
-        return false;
-    }
-
-    LSTATUS status = ERROR_SUCCESS;
-    if (autoStartEnabled_) {
-        const std::wstring command = GetAutoStartCommand();
-        if (command.empty()) {
-            RegCloseKey(key);
-            return false;
-        }
-        status = RegSetValueExW(
-            key, kRunValueName, 0, REG_SZ,
-            reinterpret_cast<const BYTE*>(command.c_str()),
-            static_cast<DWORD>((command.size() + 1) * sizeof(wchar_t)));
-    } else {
-        status = RegDeleteValueW(key, kRunValueName);
-        if (status == ERROR_FILE_NOT_FOUND) {
-            status = ERROR_SUCCESS;
-        }
-    }
-
-    RegCloseKey(key);
-    return status == ERROR_SUCCESS;
+bool AppSettings::ApplyAutoStart(std::wstring* error,const std::wstring& nameSpace) const {
+    std::wstring failure;
+    const bool ok=startup_registration::Apply(autoStartEnabled_,app_storage::Root()/L"PcTool.exe",failure,nameSpace);
+    if(error)*error=std::move(failure);
+    return ok;
 }
