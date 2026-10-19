@@ -421,6 +421,10 @@ struct TranslationController::Impl {
             if(!IsWindow(lastSelectionSource)||pid!=lastSelectionPid){FinishEntry(EntryOutcome::Failure,L"原取词窗口已关闭，请回到需要取词的应用重试。");return;}
             original=lastSelectionSource;
         }
+        DWORD sourcePid{};GetWindowThreadProcessId(original,&sourcePid);
+        if(ClipboardSource::HigherIntegrity(sourcePid)){
+            FinishEntry(EntryOutcome::Failure,L"来源程序以管理员权限运行，Windows 阻止普通权限取词。请在来源程序中复制文字，再粘贴到翻译窗口。");return;
+        }
         // RegisterHotKey consumes E, but the source still receives Alt-up. In
         // WPF that can activate the menu bar even though no Win32 menu flag is
         // set. Mask only this accepted chord, before creating/showing our UI.

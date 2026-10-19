@@ -15,7 +15,8 @@ int main(int argc,char**){
     if(released==INVALID_HANDLE_VALUE)return 8;CloseHandle(released);
     const auto cache=PcToolStorage::Directory(L"Cache");SYSTEMTIME today{};GetLocalTime(&today);wchar_t suffix[40]{};
     wsprintfW(suffix,L"\\%04u-%02u-%02u\\SevenZip",unsigned(today.wYear),unsigned(today.wMonth),unsigned(today.wDay));
-    if(cache!=PcToolStorage::Root()+L"\\Cache"+suffix||PcToolStorage::Directory(L"Data")!=PcToolStorage::Root()+L"\\Data\\SevenZip")return 6;
+    const auto sid=PcToolUserDirectory::Sid();
+    if(cache!=PcToolStorage::Root()+L"\\Cache\\"+sid+suffix||PcToolStorage::Directory(L"Data")!=PcToolStorage::Root()+L"\\Data\\"+sid+L"\\SevenZip")return 6;
     if(PcToolStorage::Directory(L"Cache")!=cache)return 7;
     std::cout<<"PASS archive private hive and installation cache\n";return 0;
 }

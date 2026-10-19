@@ -133,21 +133,8 @@ if($Action -eq 'Install'){
    if(Test-Path -LiteralPath $path){Protect-Payload $path ([bool]((Get-Item -LiteralPath $path -Force).PSIsContainer))}
   }
  }else{Protect-Payload (Join-Path $Root 'PcTool.exe') $false}
- $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User
- foreach($name in @('Data','Cache')){
-  $path=Join-Path $Root $name
-  if(Test-Path -LiteralPath $path){if((Get-Item -LiteralPath $path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Data root cannot be a reparse point'}}
-  New-Item -ItemType Directory -Path $path -Force | Out-Null
-  $acl=New-Object Security.AccessControl.DirectorySecurity
-  $acl.SetAccessRuleProtection($true,$false)
-  foreach($entry in @(@('S-1-5-18','FullControl'),@('S-1-5-32-544','FullControl'),@($sid.Value,'Modify'))){
-   $identity=New-Object Security.Principal.SecurityIdentifier($entry[0])
-   $rule=New-Object Security.AccessControl.FileSystemAccessRule($identity,$entry[1],'ContainerInherit,ObjectInherit','None','Allow')
-   $acl.AddAccessRule($rule)
-  }
-  $directory=New-Object IO.DirectoryInfo($path)
-  if($PSVersionTable.PSEdition -eq 'Core'){[IO.FileSystemAclExtensions]::SetAccessControl($directory,$acl)}else{$directory.SetAccessControl($acl)}
- }
+ & (Join-Path $PSScriptRoot 'lifecycle.ps1') -Action MigrateData -Root $Root -Namespace $CleanupNamespace
+ if($LASTEXITCODE){throw 'Per-user data migration failed'}
  Remove-Item -LiteralPath (Join-Path $Root '.pctool-uninstalling') -Force -ErrorAction SilentlyContinue
  $archive=Resolve-Owned 'modules/archive'
  $old=@()
@@ -167,7 +154,7 @@ if($Action -eq 'Finalize'){
  $runtime=@{}
  foreach($name in @('cleanup-jobs.ps1','retry-cleanup.ps1')){$runtime[$name]=[IO.File]::ReadAllText((Join-Path $PSScriptRoot $name))}
  $bootstrap=@()
- foreach($relative in @('manage-data.ps1','cleanup-jobs.ps1','retry-cleanup.ps1','shell-integration.ps1','PcToolUninstallHelper.exe','Uninstall.exe','.pctool-package-files.json','.pctool-managed-files.json')){
+ foreach($relative in @('manage-data.ps1','cleanup-jobs.ps1','retry-cleanup.ps1','shell-integration.ps1','lifecycle.ps1','PcToolUninstallHelper.exe','Uninstall.exe','.pctool-package-files.json','.pctool-managed-files.json')){
   $entry=New-CleanupEntry $Root $relative;if($entry){$bootstrap+=@($entry);$entries+=@($entry)}
  }
  $pending=$false
@@ -176,6 +163,15 @@ if($Action -eq 'Finalize'){
  $store=Get-CleanupStore $CleanupNamespace;$existing=@()
  if(Test-Path -LiteralPath $store){$hash=Get-CleanupRootHash $Root;$existing=@(Get-ChildItem -LiteralPath $store -Directory -Force|Where-Object {$_.Name.StartsWith($hash+'-',[StringComparison]::Ordinal)})}
  if(!$pending -and !$existing.Count){
+  $retryUninstaller=$null
+  $uninstallerPath=Join-Path $Root 'Uninstall.exe'
+  if(Test-Path -LiteralPath $uninstallerPath){
+   try{$retryUninstaller=[IO.File]::ReadAllBytes($uninstallerPath)}catch{
+    # An occupied retry executable cannot be deleted either, so its original
+    # remains available; let the normal identity-bound retry path handle it.
+    if(($_.Exception.GetBaseException().HResult -band 65535) -notin @(32,33,1224)){throw}
+   }
+  }
   # Normal, unlocked uninstall needs no Task Scheduler service. The embedded
   # uninstaller is removed last so a newly discovered bootstrap lock/error can
   # still be retried even after the other bootstrap scripts have been removed.
@@ -187,6 +183,7 @@ if($Action -eq 'Finalize'){
      $entry=New-CleanupEntry $Root $name;if($entry -and !(Remove-CleanupEntry $Root $entry)){$pending=$true;break}
     }
     if(!$pending){foreach($entry in @($bootstrap|Where-Object {$_.Path -eq 'Uninstall.exe'})){if(!(Remove-CleanupEntry $Root $entry)){$pending=$true}}}
+    if(!$pending){$pending=!(Remove-CleanupRoot $Root $instance $retryUninstaller)}
     $finalizationFailed=$false
    }finally{
     # If final deletion was blocked, restore authoritative state before a job
@@ -197,11 +194,16 @@ if($Action -eq 'Finalize'){
     }
    }
   }
-  if(!$pending){try{[IO.Directory]::Delete($Root,$false)}catch{};exit 0}
+  if(!$pending){exit 0}
+  # An empty-root lock may have required restoring the embedded retry tool.
+  # Register its current identity, rather than the deleted original's identity.
+  $entries=@($entries|Where-Object {$_.Path -ne 'Uninstall.exe'})
+  $retryEntry=New-CleanupEntry $Root 'Uninstall.exe';if($retryEntry){$entries+=@($retryEntry)}
  }
  # Known occupied content is registered before any bootstrap is removed.
  # RuntimeSource also survives a new bootstrap lock discovered on the fast path.
  $registered=Register-CleanupJob $Root $CleanupNamespace 'uninstall' $entries $runtime
+ if($script:PendingMappedImage){[void](Retire-CleanupRoot $registered.Directory $registered.Job)}
  if(Invoke-CleanupJob $registered.Directory $registered.Job){exit 0}
  Write-Output 'Cleanup registered for immediate, five-minute and logon retries; Windows restart is not required.'
  exit 2
@@ -210,38 +212,7 @@ if($Action -eq 'Finalize'){
 $script:failures=[Collections.Generic.List[string]]::new()
 $classesPath='Software\Classes';$runPath='Software\Microsoft\Windows\CurrentVersion\Run'
 if($CleanupNamespace -ne 'PcTool'){$classesPath='Software\'+$CleanupNamespace+'\Classes';$runPath='Software\'+$CleanupNamespace+'\Run'}
-try {
- $scheduler=New-Object -ComObject 'Schedule.Service';$scheduler.Connect()
- $folder=$null
- try{$folder=$scheduler.GetFolder('\'+$CleanupNamespace+'\Startup')}catch{if($_.Exception.GetBaseException().HResult -notin @(-2147024894,-2147024893)){throw}}
- if($folder){
-  $hash=Get-CleanupRootHash $Root;$executable=Join-Path $Root 'PcTool.exe'
-  foreach($task in @($folder.GetTasks(1))){
-   $definition=$task.Definition;$sid=[string]$definition.Principal.UserId
-   if($sid -notlike 'S-1-*'){$sid=([Security.Principal.NTAccount]::new($sid)).Translate([Security.Principal.SecurityIdentifier]).Value}
-   if($task.Name -ne ($sid+'-'+$hash) -or $definition.RegistrationInfo.Description -ine ('PcTool Startup v1|'+$sid+'|'+$executable)){continue}
-   if($definition.Principal.LogonType -ne 3 -or $definition.Principal.RunLevel -ne 1 -or $definition.Actions.Count -ne 1){continue}
-   $startupExecAction=$definition.Actions.Item(1)
-   if($startupExecAction.Type -ne 0 -or $startupExecAction.Path -ine $executable -or $startupExecAction.Arguments -cne '--background'){continue}
-   # The native helper already stopped owned processes. Do not stop tasks
-   # here: a replacement definition must never terminate an unrelated app.
-   $folder.DeleteTask($task.Name,0)
-  }
- }
-}catch{$script:failures.Add('Startup task removal: '+$_.Exception.Message)}
-# Remove this installation's startup entry from every currently loaded user hive.
-try {
- foreach($sid in [Microsoft.Win32.Registry]::Users.GetSubKeyNames() | Where-Object {$_ -match '^S-1-5-\d+(?:-\d+)+$'}){
-  $run=[Microsoft.Win32.Registry]::Users.OpenSubKey($sid+'\'+$runPath,$true)
-  if($null -eq $run){continue}
-  try{
-   if([string]$run.GetValue('PcTool') -eq ('"'+$Root+'\PcTool.exe" --background')){
-    $run.DeleteValue('PcTool',$false)
-    if($null -ne $run.GetValue('PcTool')){throw 'Startup registration survived removal'}
-   }
-  }finally{$run.Dispose()}
- }
-}catch{$script:failures.Add($_.Exception.Message)}
+try{& (Join-Path $PSScriptRoot 'lifecycle.ps1') -Action RemoveStartup -Root $Root -Namespace $CleanupNamespace;if($LASTEXITCODE){throw 'Startup cleanup failed'}}catch{$script:failures.Add($_.Exception.Message)}
 try {
 # Remove associations created through the bundled manager only while their
 # command still points to this installation. Never remove another 7-zip's keys.
@@ -293,7 +264,7 @@ try{
  Add-Owned 'Cache' $true;Add-Owned 'Data' $true
  if(Test-Path -LiteralPath $inventoryPath){
   $inventory=Read-Inventory $inventoryPath
-  $bootstrap=@('manage-data.ps1','cleanup-jobs.ps1','retry-cleanup.ps1','shell-integration.ps1','PcToolUninstallHelper.exe','Uninstall.exe','.pctool-package-files.json','.pctool-managed-files.json','.pctool-uninstalling','.pctool-install-instance.json')
+  $bootstrap=@('manage-data.ps1','cleanup-jobs.ps1','retry-cleanup.ps1','shell-integration.ps1','lifecycle.ps1','PcToolUninstallHelper.exe','Uninstall.exe','.pctool-package-files.json','.pctool-managed-files.json','.pctool-uninstalling','.pctool-install-instance.json')
   foreach($relative in $inventory.Files){if($relative -notin $bootstrap){
    $file=Resolve-Owned $relative
    if((Test-Path -LiteralPath $file) -and (Get-Item -LiteralPath $file -Force).PSIsContainer){throw "Expected managed file: $relative"}

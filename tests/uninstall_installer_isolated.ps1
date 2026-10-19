@@ -19,7 +19,7 @@ $script=$script.Replace('Software\Microsoft\Windows\CurrentVersion\Uninstall\PcT
 $script=$script.Replace('$SMPROGRAMS\PcTool','$INSTDIR\test-shortcuts').Replace('$DESKTOP\PcTool.lnk','$INSTDIR\test-desktop.lnk')
 $script=$script.Replace('..\Resources\PcTool.ico',"$project\Resources\PcTool.ico")
 $script=$script.Replace('MUI_PAGE_LICENSE "license.txt"',('MUI_PAGE_LICENSE "'+$project+'\packaging\license.txt"'))
-foreach($name in @('manage-data.ps1','cleanup-jobs.ps1','retry-cleanup.ps1','shell-integration.ps1')){$script=$script.Replace(('"'+$name+'"'),('"'+$project+'\packaging\'+$name+'"'))}
+foreach($name in @('manage-data.ps1','cleanup-jobs.ps1','retry-cleanup.ps1','shell-integration.ps1','lifecycle.ps1')){$script=$script.Replace(('"'+$name+'"'),('"'+$project+'\packaging\'+$name+'"'))}
 [IO.File]::WriteAllText("$base/test.nsi",$script,[Text.UTF8Encoding]::new($true))
 $compiler="$project/out/nsis/nsis-3.12/makensis.exe"
 if(!(Test-Path -LiteralPath $compiler)){$compiler=(Get-ChildItem "$project/out/package-tools" -Filter makensis.exe -Recurse|Select-Object -First 1).FullName}
@@ -71,12 +71,11 @@ function Queue-Snapshot {
  try{return @($key.GetValue('PendingFileRenameOperations',[string[]]@())) -join "`0"}finally{$key.Dispose()}
 }
 function Install-App($destination){
- # Explicit user preference: these writable-path lifecycle fixtures do not
- # enable elevated autostart. Its enabled path is tested in protected fixtures.
- New-Item -ItemType Directory -Path (Join-Path $destination 'Data') -Force | Out-Null
- [IO.File]::WriteAllText((Join-Path $destination 'Data/settings.ini'),"[PcTool]`r`nVersion=1`r`nAutoStart=0`r`n",[Text.UTF8Encoding]::new($false))
+ # The installer does not write the elevation account's startup preference;
+ # the first ordinary product launch initializes the interactive user's Run.
  $setup=Start-Process -FilePath "$base/Setup.exe" -ArgumentList @('/S',"/D=$destination") -WindowStyle Hidden -PassThru -Wait
  Check ($setup.ExitCode -eq 0) "Install failed: $($setup.ExitCode)"
+ Check (!(Test-Path (Join-Path $destination 'Data/settings.ini'))) 'Installer created legacy flat settings'
  Check (Test-Path "$destination/.pctool-managed-files.json") 'Installed inventory missing'
  foreach($dll in @('7-zip.dll','7-zip32.dll')){Check ((Get-FileHash "$destination/modules/archive/$dll").Hash -eq (Get-FileHash "$Stage/modules/archive/$dll").Hash) 'Installed extension hash mismatch'}
  foreach($binary in @('PcTool.exe','PcToolUninstallHelper.exe')){Check ((Get-FileHash (Join-Path $destination $binary)).Hash -eq (Get-FileHash (Join-Path $Stage $binary)).Hash) 'Installed executable hash mismatch'}
@@ -90,6 +89,7 @@ function Uninstall-App($destination,$label){
  $uninstall=Start-Process -FilePath $runner -ArgumentList @('/S',"_?=$destination") -WindowStyle Hidden -PassThru -Wait
  Check ($uninstall.ExitCode -eq 0) "Uninstall failed: $($uninstall.ExitCode)"
  $startupName=$startupSid+'-'+(Get-CleanupRootHash $destination)
+ $script:startupFolder=$null
  Check (@((Startup-Folder).GetTasks(1)|Where-Object {$_.Name -eq $startupName}).Count -eq 0) 'Uninstall left its administrator startup task'
  foreach($registry in $keys){Check ($null -eq (Read-Value $registry "$namespace\Uninstall" 'DisplayName')) 'Uninstall registration remains'}
  Write-Host "Uninstall $label returned 0 in $([math]::Round($elapsed.Elapsed.TotalSeconds,2)) s"
@@ -197,6 +197,32 @@ try{
   foreach($registry in $keys){$registry.DeleteSubKeyTree($namespace,$false)}
   "PASS isolated install, mapped-DLL upgrade, cached x64/x86 COM uninstall, repeat uninstall, scheduled cleanup and unrelated file preservation ($label); cleanup wait $([math]::Round($seconds,2)) s"
  }
+ # No unrelated user files: a real mapped x64/x86 image must no longer leave
+ # the installation directory behind, even while both external hosts survive.
+ $destination=[IO.Path]::GetFullPath((Join-Path $base 'retired-root app 中文'));$destinations+=,$destination
+ Install-App $destination
+ $mapped64=Start-Host $destination 'retired-root' 'x64'
+ $mapped32=Start-Host $destination 'retired-root' 'x86'
+ Uninstall-App $destination 'retired-root'
+ Check (!(Test-Path -LiteralPath $destination)) 'Mapped DLL left original installation directory behind'
+ Check-Host $mapped64;Check-Host $mapped32
+ $jobs=@(Get-ChildItem -LiteralPath (Get-CleanupStore $cleanupNamespace) -Filter job.json -Recurse|ForEach-Object {Get-Content -LiteralPath $_.FullName -Raw|ConvertFrom-Json}|Where-Object {$_.Root -eq $destination})
+ Check ($jobs.Count -eq 1) 'Retired cleanup record missing'
+ $retired=Get-JobPhysicalRoot $jobs[0]
+ Check ($retired -ne $destination -and (Test-Path "$retired/.pctool-uninstalling")) 'Retired uninstall state missing'
+ Install-App $destination
+ Release-Host $mapped64;Release-Host $mapped32
+ [void](Wait-Cleanup $destination $false)
+ Check (!(Test-Path $retired) -and (Test-Path "$destination/PcTool.exe")) 'Retired cleanup left files or damaged reinstall'
+ Uninstall-App $destination 'retired-root-new'
+ Check (!(Test-Path -LiteralPath $destination)) 'Reinstalled application did not uninstall cleanly'
+ 'PASS mapped x64/x86 DLLs retire out of original directory; hosts survive; detached cleanup preserves reinstall'
+ $destination=[IO.Path]::GetFullPath((Join-Path $base 'clean-root app 中文'));$destinations+=,$destination
+ Install-App $destination
+ Uninstall-App $destination 'clean-root'
+ [void](Wait-Cleanup $destination $false)
+ Check (!(Test-Path -LiteralPath $destination)) 'Empty installation root survived normal uninstall'
+ 'PASS unlocked uninstall removes every generated file and the installation root'
  Check ((Production-Snapshot) -ceq $before) 'Production integration changed'
  Check ((Queue-Snapshot) -ceq $queueBefore) 'Installer wrote a reboot-delete operation'
  'PASS production registry isolation and no new reboot-delete operations'

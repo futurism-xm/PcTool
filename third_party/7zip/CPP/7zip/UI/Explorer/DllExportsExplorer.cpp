@@ -164,6 +164,8 @@ BOOL WINAPI DllMain(
 
 // Used to determine whether the DLL can be unloaded by OLE
 
+extern "C" BOOL WINAPI PcToolSupportsRetirement(void) { return TRUE; }
+
 STDAPI DllCanUnloadNow(void)
 {
   ODS("In DLLCanUnloadNow\r\n");

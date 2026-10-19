@@ -3,6 +3,7 @@
 LIBRARY "7-zip"
 
 EXPORTS
+  PcToolSupportsRetirement PRIVATE
   DllCanUnloadNow PRIVATE
   DllGetClassObject PRIVATE
   DllRegisterServer PRIVATE

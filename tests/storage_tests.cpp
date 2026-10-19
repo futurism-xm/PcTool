@@ -41,9 +41,8 @@ int main(int argc,char** argv){
     if(argc==2&&std::string(argv[1])=="--core"){CacheReferenceTests();return 0;}
     app_storage::Initialize();
     auto data=app_storage::Data(),cache=app_storage::CacheRoot();
-    Check(data==app_storage::Root()/L"Data"&&cache==app_storage::Root()/L"Cache","SID layer remains in storage path");
-    const auto legacyData=data/app_storage::UserSid(),legacyCache=cache/app_storage::UserSid();
-    Check(!std::filesystem::exists(legacyData)&&!std::filesystem::exists(legacyCache),"startup created SID directory");
+    Check(data==app_storage::Root()/L"Data"/app_storage::UserSid()&&cache==app_storage::Root()/L"Cache"/app_storage::UserSid(),"storage is not per-user within installation");
+    Check(PcToolUserDirectory::Private(data.wstring(),app_storage::UserSid()),"user data ACL is not private");
     const auto original=std::filesystem::current_path();std::filesystem::current_path(std::filesystem::temp_directory_path());Check(app_storage::Data()==data,"working directory changed storage root");std::filesystem::current_path(original);
     AppSettings settings;settings.SetTranslationEnabled(true);settings.SetAutoStartEnabled(false);auto keys=hotkeys::Defaults;keys[7]={MOD_CONTROL,VK_F11};settings.SetHotkeys(keys);Check(settings.Save(),"save failed");
     AppSettings restored;restored.Load();Check(restored.TranslationEnabled()&&!restored.AutoStartEnabled()&&restored.Hotkeys()==keys,"settings reload mismatch");
@@ -56,15 +55,6 @@ int main(int argc,char** argv){
     SetFileAttributesW(settingsFile.c_str(),FILE_ATTRIBUTE_READONLY);
     const bool refused=!settings.Save();SetFileAttributesW(settingsFile.c_str(),FILE_ATTRIBUTE_NORMAL);
     Check(refused,"read-only settings silently accepted");restored.Load();Check(restored.Hotkeys()==keys,"failed save damaged original settings");
-    std::filesystem::create_directories(legacyData);
-    Check(MoveFileW(settingsFile.c_str(),(legacyData/L"settings.ini").c_str())!=FALSE,"cannot prepare old settings");
-    app_storage::AtomicWrite(legacyData/L"Translation/migration-fixture.bin","encrypted bytes unchanged");
-    app_storage::Data();restored.Load();Check(restored.Hotkeys()==keys,"legacy settings migration lost values");
-    std::ifstream migrated(data/L"Translation/migration-fixture.bin",std::ios::binary);std::string bytes((std::istreambuf_iterator<char>(migrated)),{});migrated.close();
-    Check(bytes=="encrypted bytes unchanged"&&!std::filesystem::exists(legacyData),"legacy data migration failed");
-    app_storage::AtomicWrite(legacyData/L"settings.ini","conflict fixture");app_storage::Data();restored.Load();
-    Check(restored.Hotkeys()==keys&&std::filesystem::exists(legacyData/L"settings.ini"),"migration overwrote existing settings");
-    DeleteFileW((legacyData/L"settings.ini").c_str());RemoveDirectoryW(legacyData.c_str());
     SYSTEMTIME realToday{};GetLocalTime(&realToday);
     for(const auto* kind:{L"Screenshots",L"Recordings",L"Gif",L"SevenZip"}){
         const auto one=app_storage::Unique(kind,L".tmp"),two=app_storage::Unique(kind,L".tmp");
@@ -103,15 +93,9 @@ int main(int argc,char** argv){
     WaitForSingleObject(ready,10000);app_storage::CleanCache(today);const bool kept=std::filesystem::exists(dead);
     SetEvent(release);locker.join();CloseHandle(ready);CloseHandle(release);Check(opened&&kept,"busy clipboard did not protect cache");
     app_storage::CleanCache(today);Check(!std::filesystem::exists(expired),"retry did not remove expired folder");
-    const auto oldReference=legacyCache/L"2026-03-01/Screenshots/referenced.png";
-    app_storage::AtomicWrite(oldReference,"old clipboard reference");
-    Check(OpenClipboard(owner)!=FALSE,"clipboard busy");EmptyClipboard();Check(SetClipboardData(CF_HDROP,app_storage::FileDrop(oldReference))!=nullptr,"old clipboard fixture failed");CloseClipboard();
-    app_storage::CleanCache(today);Check(std::filesystem::exists(oldReference),"old SID clipboard path was moved or deleted");
-    Check(OpenClipboard(owner)!=FALSE,"clipboard busy");EmptyClipboard();CloseClipboard();
-    app_storage::AtomicWrite(legacyCache/L"2026-03-02/keep.txt","seven days");app_storage::CleanCache(today);
-    Check(!std::filesystem::exists(oldReference)&&std::filesystem::exists(legacyCache/L"2026-03-02/keep.txt"),"legacy SID retention boundary failed");
-    SYSTEMTIME tomorrow=today;tomorrow.wDay=10;app_storage::CleanCache(tomorrow);
-    Check(!std::filesystem::exists(legacyCache),"empty old SID directory survived cleanup");
+    const auto otherUser=app_storage::Root()/L"Cache/S-1-5-21-999-999-999-999/2026-03-01/keep.txt";
+    app_storage::AtomicWrite(otherUser,"other user");app_storage::CleanCache(today);
+    Check(std::filesystem::exists(otherUser),"cleanup crossed user boundary");
     auto external=app_storage::Root()/L"external-fixture";std::filesystem::create_directories(external);app_storage::AtomicWrite(external/L"keep.txt","keep");
     std::filesystem::create_directories(expired);auto link=expired/L"junction-fixture";
     if(CreateSymbolicLinkW(link.c_str(),external.c_str(),SYMBOLIC_LINK_FLAG_DIRECTORY|2)){
@@ -120,6 +104,6 @@ int main(int argc,char** argv){
     ULONGLONG leap{},next{};Check(app_storage::ParseDate(L"2024-02-29",leap)&&app_storage::ParseDate(L"2024-03-01",next)&&next-leap==1,"leap calendar failed");
     Check(!app_storage::ParseDate(L"2025-02-29",next),"invalid leap date accepted");
     Check(app_storage::ParseDate(L"2025-12-31",leap)&&app_storage::ParseDate(L"2026-01-01",next)&&next-leap==1,"year boundary failed");
-    DestroyWindow(owner);std::cout<<"PASS flat storage, legacy configuration migration, dated cache, 7/8-day boundary, legacy SID clipboard paths, leases and cleanup\n";return 0;
+    DestroyWindow(owner);std::cout<<"PASS private per-user installation storage, preferences, dated cache, 7/8-day boundary, user isolation, leases and cleanup\n";return 0;
  }catch(const std::exception& e){std::cerr<<e.what()<<"\n";return 1;}
 }

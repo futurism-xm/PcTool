@@ -3,7 +3,8 @@
 #include <string>
 
 namespace startup_registration {
-// Namespace is explicit so tests cannot touch the production task or Run key.
+std::wstring ValueName(const std::filesystem::path& executable);
+// Current user's ordinary Run entry. Tests always use an isolated namespace.
 bool Apply(bool enabled,const std::filesystem::path& executable,std::wstring& error,
            const std::wstring& nameSpace=L"PcTool");
 }

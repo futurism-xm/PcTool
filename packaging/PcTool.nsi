@@ -19,15 +19,19 @@ ShowUninstDetails show
 !define MUI_ICON "..\Resources\PcTool.ico"
 !define MUI_UNICON "..\Resources\PcTool.ico"
 !define MUI_ABORTWARNING
+Var FinishText
+Var UninstallFinishText
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_LICENSE "license.txt"
 !define MUI_PAGE_CUSTOMFUNCTION_LEAVE ValidateDirectory
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
+!define MUI_FINISHPAGE_TEXT "$FinishText"
 !insertmacro MUI_PAGE_FINISH
 !define MUI_UNCONFIRMPAGE_TEXT_TOP "确认卸载后，将终止 PcTool 及内置 7-Zip 的全部任务，包括录屏、GIF、压缩和解压。未完成结果可能不可用。被其他程序占用的文件会在释放后自动清理，无需重启电脑或资源管理器。"
 !insertmacro MUI_UNPAGE_CONFIRM
 !insertmacro MUI_UNPAGE_INSTFILES
+!define MUI_FINISHPAGE_TEXT "$UninstallFinishText"
 !insertmacro MUI_UNPAGE_FINISH
 !insertmacro MUI_LANGUAGE "SimpChinese"
 Var OldDirectory
@@ -39,6 +43,8 @@ Var CleanupPending
 !endif
 
 Function .onInit
+  StrCpy $FinishText "PcTool 已安装完成。"
+
   ${IfNot} ${RunningX64}
     MessageBox MB_ICONSTOP "PcTool 安装包需要 64 位 Windows。"
     Abort
@@ -77,6 +83,7 @@ FunctionEnd
   File /oname=$PLUGINSDIR\cleanup-jobs.ps1 "cleanup-jobs.ps1"
   File /oname=$PLUGINSDIR\retry-cleanup.ps1 "retry-cleanup.ps1"
   File /oname=$PLUGINSDIR\shell-integration.ps1 "shell-integration.ps1"
+  File /oname=$PLUGINSDIR\lifecycle.ps1 "lifecycle.ps1"
   File /oname=$PLUGINSDIR\PcToolUninstallHelper.exe "${STAGE}\PcToolUninstallHelper.exe"
   nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\manage-data.ps1" -Action LockName -Root "$INSTDIR" -CleanupNamespace "${PCTOOL_CLEANUP_NAMESPACE}"'
   Pop $0
@@ -165,6 +172,22 @@ Section "PcTool 与完整 7-Zip" Main
     !insertmacro FinishTransaction
     SetErrorLevel 1
     MessageBox MB_ICONSTOP "无法准备安装或处理旧卸载记录，安装未完成。请查看详细记录后重试。" /SD IDOK
+    Abort
+  ${EndIf}
+  nsExec::ExecToLog '"$PLUGINSDIR\PcToolUninstallHelper.exe" mark "$INSTDIR"'
+  Pop $0
+  ${If} $0 != 0
+    !insertmacro FinishTransaction
+    SetErrorLevel 1
+    MessageBox MB_ICONSTOP "无法设置升级状态，安装未完成。" /SD IDOK
+    Abort
+  ${EndIf}
+  nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\lifecycle.ps1" -Action RemoveStartup -Root "$INSTDIR" -Namespace "${PCTOOL_CLEANUP_NAMESPACE}" -LegacyOnly'
+  Pop $0
+  ${If} $0 != 0
+    !insertmacro FinishTransaction
+    SetErrorLevel 1
+    MessageBox MB_ICONSTOP "旧版自启迁移失败，已保留重试入口。" /SD IDOK
     Abort
   ${EndIf}
   !insertmacro StopOwnedTasks
@@ -256,18 +279,13 @@ Section "PcTool 与完整 7-Zip" Main
     Abort
   ${EndIf}
   System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
-  nsExec::ExecToStack '"$INSTDIR\PcTool.exe" --configure-startup "${PCTOOL_CLEANUP_NAMESPACE}"'
-  Pop $0
-  Pop $1
-  ${If} $0 != 0
-    DetailPrint "程序文件和菜单已安装，但管理员开机启动配置失败（$0）。"
-    MessageBox MB_ICONEXCLAMATION "程序文件和菜单已安装，但管理员开机启动配置失败（$0）。请手动启动 PcTool 查看具体路径。支持非系统盘安装，可使用 D:\PcTool 等受保护的独立目录；程序及上级目录不能被普通进程替换。" /SD IDOK
-    SetErrorLevel 1603
-  ${EndIf}
   !insertmacro FinishTransaction
 SectionEnd
 
 Function un.onInit
+  StrCpy $UninstallFinishText "PcTool 已卸载完成。"
+  ; Do not keep the installation directory open as our working directory.
+  SetOutPath "$TEMP"
   SetRegView 64
   SetShellVarContext all
 FunctionEnd
@@ -317,6 +335,22 @@ Section "Uninstall"
   IfFileExists "$INSTDIR\.pctool-managed-files.json" uninstall_stop
   IfFileExists "$INSTDIR\.pctool-install-instance.json" uninstall_stop uninstall_unregister
   uninstall_stop:
+  nsExec::ExecToLog '"$PLUGINSDIR\PcToolUninstallHelper.exe" mark "$INSTDIR"'
+  Pop $0
+  ${If} $0 != 0
+    !insertmacro FinishTransaction
+    SetErrorLevel 1
+    MessageBox MB_ICONSTOP "无法设置卸载状态，卸载未开始。" /SD IDOK
+    Abort
+  ${EndIf}
+  nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\lifecycle.ps1" -Action RemoveStartup -Root "$INSTDIR" -Namespace "${PCTOOL_CLEANUP_NAMESPACE}"'
+  Pop $0
+  ${If} $0 != 0
+    !insertmacro FinishTransaction
+    SetErrorLevel 1
+    MessageBox MB_ICONSTOP "自启清理失败，已保留卸载重试入口。" /SD IDOK
+    Abort
+  ${EndIf}
   DetailPrint "正在停止本次安装的 PcTool 和内置 7-Zip 任务……"
   !insertmacro StopOwnedTasks
   uninstall_unregister:
@@ -367,7 +401,14 @@ Section "Uninstall"
   Call un.RemoveInstallerRegistration
   System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
   ${If} $CleanupPending == 2
-    DetailPrint "PcTool 菜单及系统注册已移除；占用文件将在释放后自动清理，无需重启电脑或资源管理器。"
+    IfFileExists "$INSTDIR\.pctool-install-instance.json" pending_in_install pending_retired
+    pending_retired:
+    StrCpy $UninstallFinishText "PcTool 的菜单、自启及安装目录中的受管文件已清理。$\r$\n$\r$\nWindows 仍加载的扩展已迁至受保护的同盘清理区，占用释放后自动删除，无需重启电脑或资源管理器。"
+    Goto pending_description_done
+    pending_in_install:
+    StrCpy $UninstallFinishText "PcTool 已停止运行，菜单、自启及系统注册已移除。$\r$\n$\r$\n其他程序仍占用少量文件，安装目录暂时保留，将在占用释放后自动清理，无需重启电脑。"
+    pending_description_done:
+    DetailPrint "$UninstallFinishText"
   ${Else}
     DetailPrint "PcTool 受管文件与系统注册已清理；用户自行保存的无关文件予以保留。"
   ${EndIf}

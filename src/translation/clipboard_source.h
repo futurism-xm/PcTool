@@ -3,6 +3,7 @@
 #include <tlhelp32.h>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 namespace translation {
 // Bind a copy request to a live process object, not just a reusable PID.
@@ -14,6 +15,17 @@ class ClipboardSource final {
         ~Handle(){if(value && value!=INVALID_HANDLE_VALUE)CloseHandle(value);}
     };
 public:
+    static bool HigherIntegrity(DWORD pid){
+        auto level=[](HANDLE process,DWORD& value){
+            Handle token{};if(!OpenProcessToken(process,TOKEN_QUERY,&token.value))return false;
+            DWORD size{};GetTokenInformation(token.value,TokenIntegrityLevel,nullptr,0,&size);std::vector<BYTE> bytes(size);
+            if(!GetTokenInformation(token.value,TokenIntegrityLevel,bytes.data(),size,&size))return false;
+            auto sid=reinterpret_cast<TOKEN_MANDATORY_LABEL*>(bytes.data())->Label.Sid;
+            value=*GetSidSubAuthority(sid,*GetSidSubAuthorityCount(sid)-1);return true;
+        };
+        Handle source{OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,FALSE,pid)};DWORD ours{},theirs{};
+        return source.value&&level(GetCurrentProcess(),ours)&&level(source.value,theirs)&&theirs>ours;
+    }
     ~ClipboardSource(){Reset();}
     ClipboardSource()=default;
     ClipboardSource(const ClipboardSource&)=delete;

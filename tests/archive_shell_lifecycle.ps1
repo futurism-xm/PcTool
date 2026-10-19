@@ -19,7 +19,9 @@ $sourceHash=File-Hash $source
 $fixture=Join-Path $project ('out/archive-shell-lifecycle/'+[guid]::NewGuid().ToString('N'))
 $installed=Join-Path $fixture 'installed'
 $installedRuntime=Join-Path $installed 'modules/archive'
-$standaloneRuntime=Join-Path $fixture 'standalone/modules/archive'
+# modules/archive is now the durable PcTool identity after its executable and
+# marker disappear. A truly standalone 7-Zip layout has no such product path.
+$standaloneRuntime=Join-Path $fixture 'standalone/runtime'
 [void](New-Item -ItemType Directory -Path $installedRuntime,$standaloneRuntime)
 [IO.File]::WriteAllText((Join-Path $installed 'PcTool.exe'),'Inert archive shell regression fixture')
 Copy-Item -LiteralPath $source -Destination (Join-Path $installedRuntime $DllName)

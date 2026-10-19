@@ -1,4 +1,4 @@
-﻿param([string]$BuildDirectory, [switch]$SkipDependencyBuild)
+param([string]$BuildDirectory, [switch]$SkipDependencyBuild)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 if (!$BuildDirectory) { $BuildDirectory = Join-Path $root 'cmake-build-release' }
@@ -75,7 +75,7 @@ function ConvertTo-NsisLiteral([string]$Value) {
     $Value.Replace('$','$$').Replace('"','$\"')
 }
 
-$requiredScripts = @('manage-data.ps1','cleanup-jobs.ps1','retry-cleanup.ps1','shell-integration.ps1')
+$requiredScripts = @('manage-data.ps1','cleanup-jobs.ps1','retry-cleanup.ps1','shell-integration.ps1','lifecycle.ps1')
 foreach ($name in $requiredScripts) {
     if (!(Test-Path -LiteralPath (Join-Path $root "packaging/$name") -PathType Leaf)) { throw "Missing required packaging script: $name" }
 }

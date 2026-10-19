@@ -14,6 +14,7 @@ void AppSettings::Load() {
     auto read=[&](const wchar_t* name,DWORD fallback){return GetPrivateProfileIntW(L"PcTool",name,fallback,path.c_str());};
     auto value=read(L"VisibleItems",visibleItems_);if(value&kAllMonitorItems)visibleItems_=value&kAllMonitorItems;
     autoStartEnabled_=read(L"AutoStart",autoStartEnabled_)!=0;
+    startupSchema_=read(L"StartupSchema",0);
     translationEnabled_=read(L"TranslationEnabled",translationEnabled_)!=0;
     screenshotEnabled_=read(L"ScreenshotEnabled",screenshotEnabled_)!=0;
     monitorInTaskbar_=read(L"MonitorInTaskbar",monitorInTaskbar_)!=0;
@@ -26,6 +27,7 @@ bool AppSettings::Save() const {
         std::string text="[PcTool]\r\nVersion=1\r\n";
         auto add=[&](const std::string& name,DWORD value){text+=name+"="+std::to_string(value)+"\r\n";};
         add("VisibleItems",visibleItems_);add("AutoStart",autoStartEnabled_);add("TranslationEnabled",translationEnabled_);add("ScreenshotEnabled",screenshotEnabled_);add("MonitorInTaskbar",monitorInTaskbar_);
+        add("StartupSchema",startupSchema_);
         for(size_t i=0;i<hotkeys_.size();++i)add("Hotkey"+std::to_string(i),MAKELONG(hotkeys_[i].key,hotkeys_[i].modifiers));
         app_storage::AtomicWrite(app_storage::Data()/L"settings.ini",text);return true;
     }catch(...){return false;}
@@ -48,4 +50,20 @@ bool AppSettings::ApplyAutoStart(std::wstring* error,const std::wstring& nameSpa
     const bool ok=startup_registration::Apply(autoStartEnabled_,app_storage::Root()/L"PcTool.exe",failure,nameSpace);
     if(error)*error=std::move(failure);
     return ok;
+}
+
+bool AppSettings::InitializeStartup(std::wstring& error,const std::wstring& nameSpace){
+    const auto oldSchema=startupSchema_;const bool oldEnabled=autoStartEnabled_;
+    if(startupSchema_<2)autoStartEnabled_=true;
+    startupSchema_=2;
+    // Check durable settings before changing startup registration. A locked or
+    // full data directory must not leave a newly enabled Run entry behind.
+    if(!Save()){
+        autoStartEnabled_=oldEnabled;startupSchema_=oldSchema;
+        error=L"无法保存开机启动设置，请检查 Data 目录权限。";return false;
+    }
+    if(ApplyAutoStart(&error,nameSpace))return true;
+    autoStartEnabled_=oldEnabled;startupSchema_=oldSchema;
+    if(!Save())error+=L"\n原启动设置恢复失败，请检查 Data 目录权限。";
+    autoStartEnabled_=false;return false;
 }

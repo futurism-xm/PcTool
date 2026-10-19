@@ -10,6 +10,7 @@
 #include <vector>
 #include <set>
 #include <stdexcept>
+#include <PcToolUserDirectory.h>
 
 namespace app_storage {
 inline std::filesystem::path Root() {
@@ -25,30 +26,13 @@ inline std::wstring UserSid() {
     LPWSTR sid{};if(!ConvertSidToStringSidW(reinterpret_cast<TOKEN_USER*>(data.data())->User.Sid,&sid))throw std::runtime_error("Cannot read SID");
     std::wstring result=sid;LocalFree(sid);return result;
 }
-inline std::filesystem::path Directory(const wchar_t* category) {
-    auto path=Root()/category;
-    const DWORD attributes=GetFileAttributesW(path.c_str());
-    if(attributes!=INVALID_FILE_ATTRIBUTES&&(attributes&FILE_ATTRIBUTE_REPARSE_POINT))throw std::runtime_error("Data directory cannot be a reparse point");
-    std::filesystem::create_directories(path);return path;
+inline std::filesystem::path UserDirectory(const wchar_t* category){
+    auto path=PcToolUserDirectory::Get(Root().wstring(),category);
+    if(path.empty())throw std::runtime_error("Cannot access private user data directory");
+    return path;
 }
-// Upgrade only this user's old configuration. Never overwrite a flat-layout value.
-inline void MergeLegacyData(const std::filesystem::path& source,const std::filesystem::path& target) {
-    if(source==target)return;
-    const auto attributes=GetFileAttributesW(source.c_str());
-    if(attributes==INVALID_FILE_ATTRIBUTES)return;
-    if(attributes&FILE_ATTRIBUTE_REPARSE_POINT)throw std::runtime_error("Legacy data cannot be a reparse point");
-    const auto targetAttributes=GetFileAttributesW(target.c_str());
-    if(targetAttributes!=INVALID_FILE_ATTRIBUTES&&(targetAttributes&FILE_ATTRIBUTE_REPARSE_POINT))throw std::runtime_error("Data target cannot be a reparse point");
-    if(targetAttributes==INVALID_FILE_ATTRIBUTES) {
-        if(!MoveFileExW(source.c_str(),target.c_str(),MOVEFILE_WRITE_THROUGH))throw std::runtime_error("Cannot migrate legacy data; close programs using it");
-        return;
-    }
-    if(!(attributes&FILE_ATTRIBUTE_DIRECTORY)||!(targetAttributes&FILE_ATTRIBUTE_DIRECTORY))return;
-    for(const auto& entry:std::filesystem::directory_iterator(source))MergeLegacyData(entry.path(),target/entry.path().filename());
-    RemoveDirectoryW(source.c_str());
-}
-inline std::filesystem::path Data(){auto root=Directory(L"Data");MergeLegacyData(root/UserSid(),root);return root;}
-inline std::filesystem::path CacheRoot(){return Directory(L"Cache");}
+inline std::filesystem::path Data(){return UserDirectory(L"Data");}
+inline std::filesystem::path CacheRoot(){return UserDirectory(L"Cache");}
 inline bool CalendarDay(SYSTEMTIME date,ULONGLONG& day) {
     date.wHour=date.wMinute=date.wSecond=date.wMilliseconds=0;
     FILETIME file{};SYSTEMTIME checked{};
@@ -156,7 +140,7 @@ inline void CleanRoot(const std::filesystem::path& root,const std::set<std::wstr
 inline void CleanCache(const SYSTEMTIME& localToday) noexcept {
     try {
         ULONGLONG today{};if(!CalendarDay(localToday,today))return;
-        auto root=Root()/L"Cache";if(!std::filesystem::exists(root)||Reparse(root))return;
+        auto root=CacheRoot();if(!std::filesystem::exists(root)||Reparse(root))return;
         if(!OpenClipboard(nullptr))return;
         std::set<std::wstring> referenced;
         auto files=static_cast<HDROP>(GetClipboardData(CF_HDROP));
@@ -164,9 +148,6 @@ inline void CleanCache(const SYSTEMTIME& localToday) noexcept {
         if(files){const auto count=DragQueryFileW(files,0xffffffff,nullptr,0);for(UINT i=0;i<count;++i){wchar_t p[32768]{};DragQueryFileW(files,i,p,32768);referenced.insert(std::filesystem::path(p).lexically_normal().wstring());}}
         CloseClipboard();
         detail::CleanRoot(root,referenced,today);
-        // Preserve old clipboard paths until expiry; no new SID directory is created.
-        const auto legacy=root/UserSid();detail::CleanRoot(legacy,referenced,today);
-        if(!Reparse(legacy))RemoveDirectoryW(legacy.c_str());
     }catch(...){}
 }
 inline void CleanCache() noexcept {SYSTEMTIME today{};GetLocalTime(&today);CleanCache(today);}

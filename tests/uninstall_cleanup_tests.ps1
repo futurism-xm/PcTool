@@ -26,9 +26,9 @@ function Prepare([string]$name){
  [IO.File]::WriteAllText((Join-Path $root 'Data/settings'),'data fixture')
  [IO.File]::WriteAllText((Join-Path $root 'Cache/cached.png'),'cache fixture')
  [IO.File]::WriteAllText((Join-Path $root 'modules/archive/7-zip.dll'),'extension fixture')
- foreach($name in @('manage-data.ps1','cleanup-jobs.ps1','retry-cleanup.ps1')){Copy-Item -LiteralPath (Join-Path $project ('packaging/'+$name)) -Destination $root}
+ foreach($name in @('manage-data.ps1','cleanup-jobs.ps1','retry-cleanup.ps1','lifecycle.ps1')){Copy-Item -LiteralPath (Join-Path $project ('packaging/'+$name)) -Destination $root}
  $manifest=Join-Path $fixture ((Split-Path -Leaf $root)+'-manifest.json')
- @{Version=1;Files=@('PcTool.exe','modules/archive/7-zip.dll','manage-data.ps1','cleanup-jobs.ps1','retry-cleanup.ps1','PcToolUninstallHelper.exe');Directories=@('modules/archive','modules')}|ConvertTo-Json|Set-Content -LiteralPath $manifest -Encoding UTF8
+ @{Version=1;Files=@('PcTool.exe','modules/archive/7-zip.dll','manage-data.ps1','cleanup-jobs.ps1','retry-cleanup.ps1','lifecycle.ps1','PcToolUninstallHelper.exe');Directories=@('modules/archive','modules')}|ConvertTo-Json|Set-Content -LiteralPath $manifest -Encoding UTF8
  Run-Action $root 'Record' 0 $manifest
  [IO.File]::WriteAllText((Join-Path $root '.pctool-uninstalling'),'guard')
  return $root
@@ -37,6 +37,12 @@ function Wait-For([scriptblock]$condition,[string]$message){
  $end=[DateTime]::UtcNow.AddSeconds(30)
  while(!(& $condition) -and [DateTime]::UtcNow -lt $end){Start-Sleep -Milliseconds 100}
  Check (& $condition) $message
+}
+function Get-TestTask($scheduler,[string]$name){
+ try{return $scheduler.Folder.GetTask($name)}catch{
+  if($_.Exception.GetBaseException().HResult -notin @(-2147024894,-2147024893)){throw}
+  return $null # A successful worker deletes its own task before its directory.
+ }
 }
 function Inject-RegistrationFailure([string]$root){
  $library=Join-Path $root 'cleanup-jobs.ps1';$text=[IO.File]::ReadAllText($library)
@@ -55,6 +61,31 @@ try{
  Check (@(Get-ChildItem -LiteralPath $root -Force).Count -eq 1) 'Normal uninstall left managed files'
  Check (Test-Path -LiteralPath (Join-Path $root 'keep.txt')) 'Unrelated file removed'
  'PASS normal uninstall needs no task registration, preserves bootstrap until Finalize and keeps unrelated files'
+
+ # An external process can hold the directory itself after all payload files
+ # have closed. Finalize must retain a retry instead of reporting it gone.
+ Add-Type @'
+using System;using System.Runtime.InteropServices;using Microsoft.Win32.SafeHandles;
+public static class PcToolDirectoryLockFixture {
+ [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern SafeFileHandle CreateFile(string p,uint a,uint s,IntPtr sa,uint c,uint f,IntPtr t);
+ public static SafeFileHandle Open(string p){var h=CreateFile(p,0x80000000,3,IntPtr.Zero,3,0x02000000,IntPtr.Zero);if(h.IsInvalid)throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());return h;}
+}
+'@
+ $root=Prepare 'locked-root'
+ Remove-Item -LiteralPath (Join-Path $root 'keep.txt') -Force
+ $held=[PcToolDirectoryLockFixture]::Open($root)
+ Run-Action $root 'Uninstall' 0
+ Run-Action $root 'Finalize' 2
+ Check (Test-Path -LiteralPath (Join-Path $root '.pctool-uninstalling')) 'Directory lock lost uninstall state'
+ $jobDirectory=@(Get-ChildItem -LiteralPath (Get-CleanupStore $namespace) -Directory)[0].FullName
+ $job=Get-Content -LiteralPath (Join-Path $jobDirectory 'job.json') -Raw|ConvertFrom-Json
+ $scheduler=Open-CleanupScheduler $namespace
+ Wait-For {$scheduler.Folder.GetTask($job.TaskName).State -ne 4} 'Directory-lock worker stayed running'
+ $held.Dispose();$held=$null
+ [void]$scheduler.Folder.GetTask($job.TaskName).Run($null)
+ Wait-For {!(Test-Path -LiteralPath $jobDirectory)} 'Directory lock retry did not complete'
+ Check (!(Test-Path -LiteralPath $root)) 'Empty root survived after external handle release'
+ 'PASS external directory lock retains state and is automatically removed after release'
 
  $root=Prepare 'locked'
  $held=[IO.File]::Open((Join-Path $root 'modules/archive/7-zip.dll'),'Open','Read','None')
@@ -96,8 +127,8 @@ try{
  Check ($job.Kind -eq 'upgrade' -and $job.Entries.Count -eq 1) 'Upgrade job includes non-old files'
  $held.Dispose();$held=$null
  $scheduler=Open-CleanupScheduler $namespace
- Wait-For {!(Test-Path -LiteralPath $jobDirectory) -or $scheduler.Folder.GetTask($job.TaskName).State -ne 4} 'Upgrade worker stayed running'
- if(Test-Path -LiteralPath $jobDirectory){[void]$scheduler.Folder.GetTask($job.TaskName).Run($null)}
+ Wait-For {$task=Get-TestTask $scheduler $job.TaskName;!$task -or $task.State -ne 4} 'Upgrade worker stayed running'
+ $task=Get-TestTask $scheduler $job.TaskName;if($task){[void]$task.Run($null)}
  Wait-For {!(Test-Path -LiteralPath $jobDirectory)} 'Upgrade cleanup did not finish'
  Check (!(Test-Path -LiteralPath $old)) 'Old DLL survived upgrade cleanup'
  Check ((Test-Path -LiteralPath (Join-Path $root 'PcTool.exe')) -and (Test-Path -LiteralPath (Join-Path $root 'modules/archive/7-zip.dll')) -and (Test-Path -LiteralPath (Join-Path $root '.pctool-install-instance.json'))) 'Upgrade cleanup touched active installation'
@@ -138,3 +169,4 @@ try{
  $store=Get-CleanupStore $namespace
  if(Test-Path -LiteralPath $store){[IO.Directory]::Delete($store,$false);[IO.Directory]::Delete((Split-Path -Parent $store),$false)}
 }
+exit 0

@@ -42,12 +42,14 @@ public:
     void SetMonitorInTaskbar(bool enabled) noexcept { monitorInTaskbar_ = enabled; }
 
     bool ApplyAutoStart(std::wstring* error=nullptr,const std::wstring& nameSpace=L"PcTool") const;
+    bool InitializeStartup(std::wstring& error,const std::wstring& nameSpace=L"PcTool");
     const hotkeys::Bindings& Hotkeys() const noexcept {return hotkeys_;}
     void SetHotkeys(const hotkeys::Bindings& keys) {hotkeys_=keys;}
 
 private:
     std::uint32_t visibleItems_{kAllMonitorItems};
     bool autoStartEnabled_{true};
+    unsigned startupSchema_{0};
     bool translationEnabled_{true};
     bool screenshotEnabled_{true};
     bool monitorInTaskbar_{true};

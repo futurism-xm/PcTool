@@ -103,7 +103,8 @@ struct RestoreFixture {
 int wmain(int argc,wchar_t** argv) {
     if(argc<2||argc>5)return 2;
     const std::wstring mode=argc>=3?argv[2]:L"";
-    const bool host=mode==L"--lifecycle-host";
+    const bool late=mode==L"--late-retirement-host";
+    const bool host=mode==L"--lifecycle-host"||late;
     if((host&&argc<4)||(!host&&argc>4)||(!mode.empty()&&!host&&mode!=L"uninstall-guard"&&mode!=L"uninstall-root-guard"&&mode!=L"uninstall-command-guard"))return 2;
     const fs::path runtime=fs::absolute(argv[1]);
     const fs::path dll=host?(argc==5?argv[4]:L"7-zip.dll"):(argc==4?argv[3]:L"7-zip.dll");
@@ -119,7 +120,15 @@ int wmain(int argc,wchar_t** argv) {
         module=LoadLibraryW((runtime/dll).c_str());if(!module)Check(HRESULT_FROM_WIN32(GetLastError()));
         auto getClass=reinterpret_cast<GetClass>(GetProcAddress(module,"DllGetClassObject"));Require(getClass!=nullptr,"Missing COM factory export");
         auto canUnload=reinterpret_cast<HRESULT(WINAPI*)()>(GetProcAddress(module,"DllCanUnloadNow"));Require(canUnload&&canUnload()==S_OK,"DLL unexpectedly pinned before creating objects");
-        {
+        if(late){
+            WriteSignal(prefix.wstring()+L".ready","ready");
+            if(WaitSignal(prefix.wstring()+L".check",prefix.wstring()+L".release")){
+                CLSID clsid{};Check(CLSIDFromString(L"{23170F69-40C1-278A-1000-000100020000}",&clsid));
+                ComPtr<IClassFactory> factory;
+                Require(getClass(clsid,IID_PPV_ARGS(&factory))==CLASS_E_CLASSNOTAVAILABLE,"Late COM request enabled a retired module");
+                WriteSignal(prefix.wstring()+L".checked","late COM request blocked");WaitSignal(prefix.wstring()+L".release");
+            }
+        }else{
             ShellProbe probe(getClass,file);
             const auto root=runtime.parent_path().parent_path();
             const auto hive=root/L"Data/SevenZip/settings.hiv";

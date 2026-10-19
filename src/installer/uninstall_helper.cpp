@@ -1,14 +1,14 @@
-#define UNICODE
-#define _UNICODE
 #include <windows.h>
 #include <tlhelp32.h>
-#include <userenv.h>
+
 #include <filesystem>
 #include <iostream>
 #include <string>
 #include <vector>
 #include <algorithm>
 #include <shlobj.h>
+#include <sddl.h>
+
 
 namespace fs = std::filesystem;
 struct Handle {
@@ -34,6 +34,7 @@ static std::wstring Image(HANDLE process) {
 struct Process { DWORD id; HANDLE handle; };
 static std::vector<Process> Owned(const std::vector<std::wstring>& images) {
     std::vector<Process> result;
+    try {
     Handle snapshot(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0));
     PROCESSENTRY32W entry{sizeof(entry)};
     if (snapshot.value == INVALID_HANDLE_VALUE) throw GetLastError();
@@ -50,6 +51,7 @@ static std::vector<Process> Owned(const std::vector<std::wstring>& images) {
         result.push_back({entry.th32ProcessID, handle});
     }
     return result;
+    } catch (...) { for(auto& process:result)CloseHandle(process.handle);throw; }
 }
 static BOOL CALLBACK CloseOwnedWindow(HWND window, LPARAM data) {
     // A console can host multiple clients. Closing it may terminate unrelated jobs.
@@ -98,102 +100,17 @@ static DWORD Stop(const fs::path& root) {
     for (auto& process : remaining) CloseHandle(process.handle);
     return failure;
 }
-static bool HasExtension(DWORD pid, const std::wstring& archive) {
-    Handle snapshot;
-    for(int attempt=0;attempt<5;++attempt){
-        snapshot.value=CreateToolhelp32Snapshot(TH32CS_SNAPMODULE|TH32CS_SNAPMODULE32,pid);
-        if(snapshot.value!=INVALID_HANDLE_VALUE||GetLastError()!=ERROR_BAD_LENGTH)break;
-        Sleep(20);
-    }
-    MODULEENTRY32W module{sizeof(module)};
-    if (snapshot.value == INVALID_HANDLE_VALUE) return false;
-    for (BOOL more = Module32FirstW(snapshot.value, &module); more; more = Module32NextW(snapshot.value, &module)) {
-        auto name = Canonical(module.szExePath);
-        if (name.size() <= archive.size() || _wcsnicmp(name.c_str(), archive.c_str(), archive.size()) || name[archive.size()] != L'\\') continue;
-        auto file = fs::path(name).filename().wstring();
-        if (Equal(file, L"7-zip.dll") || Equal(file, L"7-zip32.dll") || file.find(L"7-zip.dll.") == 0 || file.find(L"7-zip32.dll.") == 0) return true;
-    }
-    return false;
-}
-static bool LiveShell() {
-    DWORD pid{};GetWindowThreadProcessId(GetShellWindow(),&pid);
-    Handle process(pid?OpenProcess(SYNCHRONIZE,FALSE,pid):nullptr);
-    return process.value&&WaitForSingleObject(process.value,0)==WAIT_TIMEOUT;
-}
-// Restore with the host's original token, never the elevated uninstaller token.
-// An originally elevated desktop (e.g. built-in Administrator) is valid too.
-static DWORD RestartHost(const Process& process,const fs::path& executable,std::wstring command,bool shell,DWORD* replacementId=nullptr) {
-    DWORD session{},currentSession{};
-    if(!ProcessIdToSessionId(process.id,&session)||!ProcessIdToSessionId(GetCurrentProcessId(),&currentSession))return GetLastError();
-    if(session!=currentSession)return ERROR_SUCCESS_REBOOT_REQUIRED;
-    Handle token,primary;
-    if(!OpenProcessToken(process.handle,TOKEN_QUERY|TOKEN_DUPLICATE|TOKEN_ASSIGN_PRIMARY,&token.value)||
-       !DuplicateTokenEx(token.value,MAXIMUM_ALLOWED,nullptr,SecurityImpersonation,TokenPrimary,&primary.value))return GetLastError();
-    STARTUPINFOW startup{sizeof(startup)};startup.lpDesktop=const_cast<wchar_t*>(L"winsta0\\default");
-    if(!shell){startup.dwFlags=STARTF_USESHOWWINDOW;startup.wShowWindow=SW_HIDE;}
-    PROCESS_INFORMATION replacement{};void* environment{};
-    CreateEnvironmentBlock(&environment,primary.value,FALSE);
-    auto mutableCommand=command;
-    BOOL started=CreateProcessWithTokenW(primary.value,0,executable.c_str(),mutableCommand.data(),
-        CREATE_UNICODE_ENVIRONMENT|CREATE_SUSPENDED,environment,executable.parent_path().c_str(),&startup,&replacement);
-    if(!started){
-        mutableCommand=command;
-        started=CreateProcessAsUserW(primary.value,executable.c_str(),mutableCommand.data(),nullptr,nullptr,FALSE,
-            CREATE_UNICODE_ENVIRONMENT|CREATE_SUSPENDED,environment,executable.parent_path().c_str(),&startup,&replacement);
-    }
-    const auto error=started?ERROR_SUCCESS:GetLastError();
-    if(environment)DestroyEnvironmentBlock(environment);
-    if(!started){std::wcerr<<L"Host recovery preparation failed, original host retained; Win32 "<<error<<L"\n";return error;}
-    struct Prepared {
-        PROCESS_INFORMATION& process;bool resumed=false;
-        ~Prepared(){if(!resumed){TerminateProcess(process.hProcess,0);WaitForSingleObject(process.hProcess,5000);}CloseHandle(process.hThread);CloseHandle(process.hProcess);}
-    } prepared{replacement};
-    // A suspended recovery process now exists. If preparation failed, the desktop
-    // would still be intact. Discard it if Windows restores the shell itself.
-    if(!TerminateProcess(process.handle,0)&&WaitForSingleObject(process.handle,0)!=WAIT_OBJECT_0)return GetLastError();
-    if(WaitForSingleObject(process.handle,5000)!=WAIT_OBJECT_0)return ERROR_TIMEOUT;
-    if(shell){for(int i=0;i<20&&!LiveShell();++i)Sleep(100);if(LiveShell())return 0;}
-    if(ResumeThread(replacement.hThread)==DWORD(-1))return ERROR_RESTART_APPLICATION;
-    prepared.resumed=true;
-    if(replacementId)*replacementId=replacement.dwProcessId;
-    if(shell){for(int i=0;i<100&&!LiveShell();++i)Sleep(100);if(!LiveShell())return ERROR_RESTART_APPLICATION;}
-    return 0;
-}
-static DWORD ReleaseShell(const fs::path& root) {
-    const auto archive = Canonical(root / L"modules/archive");
-    if (archive.empty()) return 0;
-    wchar_t windows[32768]; GetWindowsDirectoryW(windows, 32768);
-    const fs::path explorer = fs::path(windows) / L"explorer.exe";
-    const auto image=Canonical(explorer);
-    auto loaded=[&]{bool result=false;auto hosts=Owned({image});for(auto& host:hosts){Handle handle(host.handle);if(HasExtension(host.id,archive))result=true;}return result;};
-    if(!loaded())return 0;
-    // Ask Explorer to invalidate its association cache, then allow normal COM
-    // reference-counted unloading. Never force-unload code inside another process.
-    std::wcout<<L"Waiting for normal extension release\n";
-    SHChangeNotify(SHCNE_ASSOCCHANGED,SHCNF_IDLIST|SHCNF_FLUSHNOWAIT,nullptr,nullptr);
-    for(int i=0;i<12;++i){Sleep(150);if(!loaded()){std::wcout<<L"Extension released without restarting Explorer\n";return 0;}}
-    auto candidates = Owned({image});
-    DWORD result = 0;
-    for (auto& process : candidates) {
-        Handle processHandle(process.handle);
-        if (!HasExtension(process.id, archive)) continue;
-        std::wcout << L"Restarting Explorer extension host " << process.id << L"\n";
-        const auto error=RestartHost(process,explorer,L"\""+explorer.wstring()+L"\"",true);
-        if(error){
-            std::wcerr<<L"Extension host "<<process.id<<L" release/restore error "<<error<<L"\n";
-            if(error==ERROR_RESTART_APPLICATION)return error;
-            result=ERROR_SUCCESS_REBOOT_REQUIRED;
-        }
-    }
-    // Do not infer release from the disappearance of a window or a launch result.
-    auto remaining=Owned({Canonical(explorer)});
-    for(auto& process:remaining){Handle handle(process.handle);if(HasExtension(process.id,archive)){
-        std::wcerr<<L"Extension still loaded by PID "<<process.id<<L"\n";result=ERROR_SUCCESS_REBOOT_REQUIRED;
-    }}
-    return result;
-}
 int wmain(int argc, wchar_t** argv) {
     if (argc != 3) return ERROR_INVALID_PARAMETER;
+    if (Equal(argv[1],L"interactive-user")) {
+        DWORD pid{};GetWindowThreadProcessId(GetShellWindow(),&pid);
+        Handle process(pid?OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,FALSE,pid):nullptr),token;
+        if(!process.value||!OpenProcessToken(process.value,TOKEN_QUERY,&token.value))return ERROR_NO_SUCH_LOGON_SESSION;
+        DWORD size{};GetTokenInformation(token.value,TokenUser,nullptr,0,&size);std::vector<BYTE> data(size);
+        if(!GetTokenInformation(token.value,TokenUser,data.data(),size,&size))return GetLastError();
+        LPWSTR sid{};if(!ConvertSidToStringSidW(reinterpret_cast<TOKEN_USER*>(data.data())->User.Sid,&sid))return GetLastError();
+        std::wcout<<sid;LocalFree(sid);return 0;
+    }
     try {
         auto root = fs::absolute(argv[2]).lexically_normal();
         for (auto ancestor = root; !ancestor.empty(); ancestor = ancestor.parent_path()) {
@@ -202,25 +119,11 @@ int wmain(int argc, wchar_t** argv) {
             if (ancestor == ancestor.root_path()) break;
         }
         DWORD attributes = GetFileAttributesW(root.c_str());
-        // A previous deferred uninstall may already have removed the executable.
-        // This recovery command only releases the surviving archive extension.
-        if(Equal(argv[1],L"repair-shell")&&root!=root.root_path()&&!fs::exists(root/L"PcTool.exe")&&
-           fs::is_regular_file(root/L"modules/archive/7-zip.dll")&&fs::is_regular_file(root/L"Data/SevenZip/settings.hiv")){
-            return static_cast<int>(ReleaseShell(root));
-        }
-        if(Equal(argv[1],L"inspect")&&attributes!=INVALID_FILE_ATTRIBUTES){
-            const auto archive=Canonical(root/L"modules/archive");
-            std::wcout<<L"Archive: "<<archive<<L"\n";
-            wchar_t windows[32768]{};GetWindowsDirectoryW(windows,32768);
-            auto hosts=Owned({Canonical(fs::path(windows)/L"explorer.exe")});
-            for(auto& host:hosts){Handle handle(host.handle);std::wcout<<L"Explorer "<<host.id<<L" owns extension: "<<HasExtension(host.id,archive)<<L"\n";}
-            return 0;
-        }
         if (root == root.root_path() || attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_REPARSE_POINT) ||
             (!fs::exists(root / L"PcTool.exe") && !fs::exists(root / L".pctool-managed-files.json") &&
              !fs::is_regular_file(root / L".pctool-install-instance.json"))) return ERROR_BAD_PATHNAME;
         if (Equal(argv[1], L"stop")) return static_cast<int>(Stop(root));
-        if (Equal(argv[1], L"release-shell") && fs::exists(root / L".pctool-uninstalling")) return static_cast<int>(ReleaseShell(root));
+        if (Equal(argv[1], L"mark")) { Handle marker(CreateFileW((root/L".pctool-uninstalling").c_str(),GENERIC_WRITE,FILE_SHARE_READ,nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr)); return marker.value==INVALID_HANDLE_VALUE?GetLastError():ERROR_SUCCESS; }
         return ERROR_INVALID_PARAMETER;
     } catch (DWORD error) { return static_cast<int>(error); }
     catch (...) { return ERROR_UNHANDLED_EXCEPTION; }

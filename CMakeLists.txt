@@ -1,10 +1,13 @@
 cmake_minimum_required(VERSION 3.24)
 
 project(PcTool VERSION 0.1.2 LANGUAGES CXX RC)
+include_directories("${CMAKE_CURRENT_SOURCE_DIR}/third_party/7zip/CPP/Windows")
 
 add_executable(PcToolUninstallHelper src/installer/uninstall_helper.cpp)
+target_include_directories(PcToolUninstallHelper PRIVATE src)
+target_compile_definitions(PcToolUninstallHelper PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_features(PcToolUninstallHelper PRIVATE cxx_std_17)
-target_link_libraries(PcToolUninstallHelper PRIVATE Advapi32 Userenv User32 Shell32)
+target_link_libraries(PcToolUninstallHelper PRIVATE Advapi32 User32 Shell32)
 if(MSVC)
     target_compile_options(PcToolUninstallHelper PRIVATE /W4 /utf-8 /EHsc)
     set_property(TARGET PcToolUninstallHelper PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
@@ -36,6 +39,7 @@ add_executable(PcTool WIN32
 # header dependencies prevent stale object layouts after a header change.
 if(MSVC AND CMAKE_GENERATOR MATCHES "Ninja")
     set(PCTOOL_ABSOLUTE_HEADERS)
+    list(APPEND PCTOOL_ABSOLUTE_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/7zip/CPP/Windows/PcToolUserDirectory.h")
     foreach(header IN LISTS PCTOOL_LOCAL_HEADERS)
         list(APPEND PCTOOL_ABSOLUTE_HEADERS
             "${CMAKE_CURRENT_SOURCE_DIR}/${header}")
@@ -43,9 +47,9 @@ if(MSVC AND CMAKE_GENERATOR MATCHES "Ninja")
     set_property(SOURCE ${PCTOOL_CPP_SOURCES} APPEND PROPERTY
         OBJECT_DEPENDS "${PCTOOL_ABSOLUTE_HEADERS}")
     set_property(SOURCE tests/storage_tests.cpp APPEND PROPERTY
-        OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/shared/platform/app_storage.h")
+        OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/shared/platform/app_storage.h;${CMAKE_CURRENT_SOURCE_DIR}/third_party/7zip/CPP/Windows/PcToolUserDirectory.h")
     set_property(SOURCE tests/archive_storage_tests.cpp APPEND PROPERTY
-        OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/7zip/CPP/Windows/PcToolStorage.h")
+        OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/7zip/CPP/Windows/PcToolStorage.h;${CMAKE_CURRENT_SOURCE_DIR}/third_party/7zip/CPP/Windows/PcToolUserDirectory.h")
 endif()
 
 target_include_directories(PcTool PRIVATE src src/app)
@@ -113,7 +117,11 @@ set_property(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" PROPERTY VS_STARTUP_PROJECT
 
 include(CTest)
 if(BUILD_TESTING)
-    add_executable(PcToolStartupTests tests/startup_registration_tests.cpp src/app/startup_registration.cpp)
+    add_executable(PcToolStartupTests tests/startup_registration_tests.cpp src/app/startup_registration.cpp src/app/app_settings.cpp)
+    add_executable(PcToolStandardUserRunner tests/standard_user_runner.cpp)
+    target_compile_features(PcToolStandardUserRunner PRIVATE cxx_std_17)
+    target_compile_definitions(PcToolStandardUserRunner PRIVATE UNICODE _UNICODE NOMINMAX)
+    target_link_libraries(PcToolStandardUserRunner PRIVATE Advapi32 Userenv User32)
     target_include_directories(PcToolStartupTests PRIVATE src)
     target_compile_features(PcToolStartupTests PRIVATE cxx_std_17)
     target_compile_definitions(PcToolStartupTests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
