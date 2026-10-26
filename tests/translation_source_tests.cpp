@@ -119,8 +119,8 @@ void Core(const std::filesystem::path& output){
     }
     const auto folder=output/L"store";SourceStore store(folder);std::vector<SourceConfig> sources;
     for(auto kind:{SourceKind::OpenAI,SourceKind::DeepL,SourceKind::Azure,SourceKind::Baidu})sources.push_back(Config(kind));
-    store.Save(sources);std::cout<<"saved"<<std::endl;auto restored=store.Load();std::cout<<"loaded "<<restored.size()<<std::endl;Check(restored.size()==4&&restored[0].key==sources[0].key&&restored[3].id==sources[3].id,"DPAPI store roundtrip");
-    std::ifstream file(folder/L"sources.json");std::string persisted((std::istreambuf_iterator<char>(file)),{});file.close();Check(persisted.find("fixture-secret")==std::string::npos,"plaintext key persisted");
+    store.Save(sources);std::cout<<"saved"<<std::endl;auto restored=store.Load();std::cout<<"loaded "<<restored.size()<<std::endl;Check(restored.size()==4&&restored[0].key==sources[0].key&&restored[3].id==sources[3].id,"portable store roundtrip");
+    std::ifstream file(folder/L"sources.json");std::string persisted((std::istreambuf_iterator<char>(file)),{});file.close();Check(JsonObject::Parse(winrt::to_hstring(persisted)).GetNamedNumber(L"version")==2,"portable version not persisted");
     std::swap(sources[0],sources[3]);sources[1].enabled=false;store.Save(sources);restored=store.Load();Check(restored[0].id==sources[0].id&&!restored[1].enabled,"order/disabled persistence");
     auto draft=NewSource(SourceKind::DeepL);draft.enabled=true;sources.push_back(draft);store.Save(sources);Check(!store.Load().back().enabled,"unverified persisted as enabled");
     Check(ContainsHan(L"mixed 汉字")&&!ContainsHan(L"Hello 123"),"translation direction");
@@ -145,7 +145,7 @@ void Core(const std::filesystem::path& output){
         auto a=std::make_shared<Deferred>(L"a"),b=std::make_shared<Deferred>(L"b");Submission submission;submission.providers={a,b};submission.Submit(L"Hello");for(int i=0;i<100;++i)a->progress(std::to_wstring(i));b->complete({L"second",{}});Check(submission.Poll()&&submission.cards[0].text==L"99"&&submission.cards[1].text==L"second","independent stream sources");
         auto stale=a->complete;submission.providers={b};submission.Reset();stale({L"obsolete",{}});Check(!submission.Poll()&&submission.cards.size()==1&&submission.cards[0].id==L"b"&&submission.cards[0].text.empty(),"removed source callback applied");
     }
-    std::cout<<"PASS source store/DPAPI/order, four protocols over loopback HTTP, signing, streamed UTF8, 429, cancellation and malformed responses\n";
+    std::cout<<"PASS portable source store/order, four protocols over loopback HTTP, signing, streamed UTF8, 429, cancellation and malformed responses\n";
 }
 void UI(const std::filesystem::path& output){
     HWND backdrop=CreateWindowExW(0,L"STATIC",L"",WS_POPUP|WS_VISIBLE|SS_WHITERECT,GetSystemMetrics(SM_XVIRTUALSCREEN),GetSystemMetrics(SM_YVIRTUALSCREEN),GetSystemMetrics(SM_CXVIRTUALSCREEN),GetSystemMetrics(SM_CYVIRTUALSCREEN),nullptr,nullptr,GetModuleHandleW(nullptr),nullptr);

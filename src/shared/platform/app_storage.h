@@ -32,6 +32,23 @@ inline std::filesystem::path UserDirectory(const wchar_t* category){
     return path;
 }
 inline std::filesystem::path Data(){return UserDirectory(L"Data");}
+// Translation sources are deliberately portable and shared by installations'
+// users. Keep the shared ACL confined to this data directory, never payloads.
+inline std::filesystem::path TranslationDirectory(){
+    const auto base=Root()/L"Data",path=base/L"Translation";
+    if(!CreateDirectoryW(base.c_str(),nullptr)&&GetLastError()!=ERROR_ALREADY_EXISTS)
+        throw std::runtime_error("Cannot create data directory");
+    if(!PcToolUserDirectory::SafeDirectory(base.wstring()))throw std::runtime_error("Unsafe data directory");
+    PSECURITY_DESCRIPTOR descriptor{};
+    if(!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;BU)",SDDL_REVISION_1,&descriptor,nullptr))
+        throw std::runtime_error("Cannot prepare translation directory permissions");
+    SECURITY_ATTRIBUTES attributes{sizeof(attributes),descriptor,FALSE};
+    const bool made=CreateDirectoryW(path.c_str(),&attributes)!=FALSE;const auto error=GetLastError();LocalFree(descriptor);
+    if((!made&&error!=ERROR_ALREADY_EXISTS)||!PcToolUserDirectory::SafeDirectory(path.wstring()))
+        throw std::runtime_error("Cannot access translation directory");
+    return path;
+}
 inline std::filesystem::path CacheRoot(){return UserDirectory(L"Cache");}
 inline bool CalendarDay(SYSTEMTIME date,ULONGLONG& day) {
     date.wHour=date.wMinute=date.wSecond=date.wMilliseconds=0;

@@ -35,7 +35,7 @@ try{
  Check ($LASTEXITCODE -eq 0) 'Inventory failed'
  & "$project/packaging/manage-data.ps1" -Action Install -Root $root -CleanupNamespace $namespace
  Check ($LASTEXITCODE -eq 0) 'Data migration/ACL failed'
- Check (!(Test-Path "$root/Data/settings.ini") -and (Get-FileHash "$root/Data/$sid/Translation/provider.bin").Hash -eq $originalHash -and (Test-Path "$root/Cache/$sid/2026-01-01/fixture.tmp")) 'Legacy data/cache migration changed bytes or retained flat files'
+ Check (!(Test-Path "$root/Data/settings.ini") -and (Get-FileHash "$root/Data/Translation/provider.bin").Hash -eq $originalHash -and !(Test-Path "$root/Data/$sid/Translation") -and (Test-Path "$root/Cache/$sid/2026-01-01/fixture.tmp")) 'Legacy migration changed bytes or moved portable Translation into SID directory'
  & $runner "$root/PcToolStartupTests.exe" --background
  Check ($LASTEXITCODE -eq 0) "Medium token storage probe failed: $LASTEXITCODE"
  $identity=@(Get-Content "$root/Data/$sid/startup-token.txt")

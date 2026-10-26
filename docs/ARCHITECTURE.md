@@ -31,4 +31,4 @@
 
 源码清单位于 `cmake/PcToolModules.cmake`。新增模块头文件必须列入该清单，兼顾当前中文 MSVC/Ninja 环境的显式头文件依赖。安装清单位于 `cmake/PcToolInstall.cmake`，安装脚本由暂存目录生成精确文件清单，卸载不递归删除用户选择的目录。
 
-翻译源目录与 DPAPI 配置存储在 `source_config`，原生设置视图在 `source_settings`，WinHTTP 传输、服务协议和 SSE 解析在 `source_provider`。`translation_submission` 负责按稳定源 ID 调度、取消和合并增量结果；`translation_controller` 管理浮窗、动态只读控件和应用入口。服务回调只持有带请求编号的邮箱，不持有窗口指针。网络请求只由验证或翻译提交发起，设置变化只刷新源目录并取消旧请求，不重新发送输入。
+翻译源目录与可移植的 v2 JSON 配置存储在 `source_config`，统一使用安装目录下的 `Data/Translation`，不读取或转换旧版加密配置及旧 SID 目录。原生设置视图在 `source_settings`，WinHTTP 传输、服务协议和 SSE 解析在 `source_provider`。`translation_submission` 负责按稳定源 ID 调度、取消和合并增量结果；`translation_controller` 管理浮窗、动态只读控件和应用入口。服务回调只持有带请求编号的邮箱，不持有窗口指针。网络请求只由验证或翻译提交发起，设置变化只刷新源目录并取消旧请求，不重新发送输入。

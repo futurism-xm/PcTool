@@ -46,6 +46,20 @@ function Merge-Verified([string]$source,[string]$target){
   Remove-Item -LiteralPath $source -Force
  }
 }
+function Set-TranslationTree([string]$path){
+ Assert-NoLink $path
+ $item=Get-Item -LiteralPath $path -Force
+ $acl=if($item.PSIsContainer){[Security.AccessControl.DirectorySecurity]::new()}else{[Security.AccessControl.FileSecurity]::new()}
+ $acl.SetAccessRuleProtection($true,$false)
+ $acl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
+ foreach($entry in @(@('S-1-5-18','FullControl'),@('S-1-5-32-544','FullControl'),@('S-1-5-32-545','Modify'))){
+  $id=[Security.Principal.SecurityIdentifier]::new($entry[0])
+  $rule=if($item.PSIsContainer){[Security.AccessControl.FileSystemAccessRule]::new($id,$entry[1],'ContainerInherit,ObjectInherit','None','Allow')}else{[Security.AccessControl.FileSystemAccessRule]::new($id,$entry[1],'Allow')}
+  $acl.AddAccessRule($rule)
+ }
+ Set-Acl -LiteralPath $path -AclObject $acl
+ if($item.PSIsContainer){foreach($child in @(Get-ChildItem -LiteralPath $path -Force)){Set-TranslationTree $child.FullName}}
+}
 if($Action -eq 'MigrateData'){
  if(!$TargetUserSid -and $Namespace -ne 'PcTool'){$TargetUserSid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value}
  if(!$TargetUserSid){
@@ -59,9 +73,13 @@ if($Action -eq 'MigrateData'){
   Assert-NoLink $base
   $target=Join-Path $base $TargetUserSid
   New-Item -ItemType Directory -Path $target -Force | Out-Null
-  foreach($child in @(Get-ChildItem -LiteralPath $base -Force|Where-Object {$_.Name -notmatch '^S-1-\d+(?:-\d+)+$'})){Merge-Verified $child.FullName (Join-Path $target $child.Name)}
+  foreach($child in @(Get-ChildItem -LiteralPath $base -Force|Where-Object {$_.Name -notmatch '^S-1-\d+(?:-\d+)+$'})){
+   if($category -eq 'Data' -and $child.Name -eq 'Translation'){continue}
+   Merge-Verified $child.FullName (Join-Path $target $child.Name)
+  }
   # Existing SID layouts are already per-user; repair only product data ACLs.
   foreach($child in @(Get-ChildItem -LiteralPath $base -Directory -Force)){
+   if($category -eq 'Data' -and $child.Name -eq 'Translation'){continue}
    if($child.Name -notmatch '^S-1-\d+(?:-\d+)+$'){throw 'Unexpected data directory after migration'}
    Set-PrivateTree $child.FullName $child.Name
   }
@@ -71,8 +89,14 @@ if($Action -eq 'MigrateData'){
   # Users may create their own private child; no inherited read/write grant.
   $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-5-32-545'),([Security.AccessControl.FileSystemRights]::ReadAndExecute -bor [Security.AccessControl.FileSystemRights]::CreateDirectories),'None','None','Allow'))
   Set-Acl -LiteralPath $base -AclObject $acl
+  if($category -eq 'Data'){
+   $translation=Join-Path $base 'Translation'
+   Assert-NoLink $translation
+   New-Item -ItemType Directory -Path $translation -Force|Out-Null
+   Set-TranslationTree $translation
+  }
  }
- Write-Output 'Per-user installation data migrated and verified.'
+ Write-Output 'Per-user data migrated; portable Data\Translation preserved and permissions verified.'
  exit 0
 }
 

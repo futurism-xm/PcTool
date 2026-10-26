@@ -73,6 +73,8 @@ function Queue-Snapshot {
 function Install-App($destination){
  # The installer does not write the elevation account's startup preference;
  # the first ordinary product launch initializes the interactive user's Run.
+ $translation=Join-Path $destination 'Data/Translation/sources.json'
+ $translationHash=if(Test-Path -LiteralPath $translation){(Get-FileHash -LiteralPath $translation).Hash}else{$null}
  $setup=Start-Process -FilePath "$base/Setup.exe" -ArgumentList @('/S',"/D=$destination") -WindowStyle Hidden -PassThru -Wait
  Check ($setup.ExitCode -eq 0) "Install failed: $($setup.ExitCode)"
  Check (!(Test-Path (Join-Path $destination 'Data/settings.ini'))) 'Installer created legacy flat settings'
@@ -80,6 +82,9 @@ function Install-App($destination){
  foreach($dll in @('7-zip.dll','7-zip32.dll')){Check ((Get-FileHash "$destination/modules/archive/$dll").Hash -eq (Get-FileHash "$Stage/modules/archive/$dll").Hash) 'Installed extension hash mismatch'}
  foreach($binary in @('PcTool.exe','PcToolUninstallHelper.exe')){Check ((Get-FileHash (Join-Path $destination $binary)).Hash -eq (Get-FileHash (Join-Path $Stage $binary)).Hash) 'Installed executable hash mismatch'}
  Check (!(Test-Path "$destination/.pctool-uninstalling")) 'Installation retained uninstall guard'
+ Check (Test-Path (Split-Path -Parent $translation)) 'Installer omitted portable Data/Translation'
+ if($translationHash){Check ((Get-FileHash -LiteralPath $translation).Hash -eq $translationHash) 'Upgrade moved or overwrote portable translation sources'}
+ else{[IO.File]::WriteAllText($translation,'{"version":2,"sources":[]}',[Text.UTF8Encoding]::new($false))}
  Register-StartupFixture $destination
 }
 function Uninstall-App($destination,$label){
